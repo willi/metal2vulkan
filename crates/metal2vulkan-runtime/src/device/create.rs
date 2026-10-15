@@ -102,6 +102,11 @@ pub struct DeviceOptions {
     /// Homebrew's `/opt/homebrew/lib` and `/usr/local/lib`. A loader that opens from none of
     /// them is [`Error::LoaderNotFound`], naming each.
     pub loader: Option<PathBuf>,
+    /// A loader's `vkGetInstanceProcAddr` the caller already resolved, used instead of opening
+    /// any library (`loader` is then ignored): for a process that cannot `dlopen` the loader
+    /// itself, a bridge into another binary format, for example. The caller keeps the library
+    /// that holds it loaded for the life of the process.
+    pub get_instance_proc_addr: Option<ash::vk::PFN_vkGetInstanceProcAddr>,
     /// Only physical devices of these kinds qualify; empty admits every kind.
     pub kinds: Vec<DeviceKind>,
     /// Where the devices keep translated shaders: by default, the platform's per-user cache
@@ -488,9 +493,21 @@ pub(crate) fn open_loader(loader: Option<&Path>) -> Result<ash::Entry, Error> {
     Err(Error::LoaderNotFound(LoaderNotFound { tried }))
 }
 
+/// The loader whose `vkGetInstanceProcAddr` is `get_instance_proc_addr`.
+fn entry_from_proc_addr(get_instance_proc_addr: ash::vk::PFN_vkGetInstanceProcAddr) -> ash::Entry {
+    let static_fn = ash::StaticFn {
+        get_instance_proc_addr,
+    };
+    // SAFETY: `DeviceOptions::get_instance_proc_addr` is a loader's, held loaded by the caller.
+    unsafe { ash::Entry::from_static_fn(static_fn) }
+}
+
 /// The instance of `options`.
 fn create_instance(options: &DeviceOptions) -> Result<Arc<InstanceShared>, Error> {
-    let entry = open_loader(options.loader.as_deref())?;
+    let entry = match options.get_instance_proc_addr {
+        Some(get_instance_proc_addr) => entry_from_proc_addr(get_instance_proc_addr),
+        None => open_loader(options.loader.as_deref())?,
+    };
     let portability = lists_portability(&entry)?;
     let mut extensions: Vec<&CStr> = Vec::new();
     if portability {
@@ -1347,6 +1364,7 @@ fn same_options(a: &DeviceOptions, b: &DeviceOptions) -> bool {
         withheld_extensions,
         messages: _,
         loader,
+        get_instance_proc_addr,
         kinds,
         shader_cache,
         withhold_generated_commands,
@@ -1365,6 +1383,8 @@ fn same_options(a: &DeviceOptions, b: &DeviceOptions) -> bool {
         && *withheld_features == b.withheld_features
         && *withheld_extensions == b.withheld_extensions
         && *loader == b.loader
+        && get_instance_proc_addr.map(|f| f as usize)
+            == b.get_instance_proc_addr.map(|f| f as usize)
         && *kinds == b.kinds
         && *shader_cache == b.shader_cache
         && *withhold_generated_commands == b.withhold_generated_commands

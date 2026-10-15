@@ -94,6 +94,8 @@ mod pipeline_wait_order;
 mod pitch_refusals;
 mod pixel_format_info;
 mod private_properties;
+#[cfg(all(target_os = "linux", any(m2v_gpu, m2v_cpu_icd)))]
+mod proc_addr_entry;
 mod queue;
 mod range;
 mod rate_map;
