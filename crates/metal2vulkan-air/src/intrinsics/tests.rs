@@ -206,22 +206,6 @@ fn math_domains_are_exclusive() {
 }
 
 #[test]
-fn integer_median3_decodes() {
-    // MSL's integer median3 is air.median3.<s|u>, and Apple's compiler emits it: the iOS 26.5 runtime's
-    // metallibs call air.median3.s.i32. Regression: it was an unknown name, so a pipeline calling it failed.
-    for (name, sign) in [
-        ("air.median3.s.i32", Sign::Signed),
-        ("air.median3.u.v4i16", Sign::Unsigned),
-        ("air.median3.s.v3i8", Sign::Signed),
-    ] {
-        assert!(
-            matches!(air(name), AirIntrinsic::Math(Math { f: MathFn::IMedian3(s), .. }) if s == sign),
-            "{name}"
-        );
-    }
-}
-
-#[test]
 fn math_conversion_and_atomic_families_decode() {
     // Math, conversion, and atomic names, each with a type the fixtures use.
     for name in [
@@ -249,6 +233,9 @@ fn math_conversion_and_atomic_families_decode() {
         "air.clamp.u.v4i32",
         "air.max3.u.i32",
         "air.min3.s.i32",
+        // Integer `median3`. Regression: it was an unknown name, so a pipeline calling it failed.
+        "air.median3.s.i32",
+        "air.median3.u.i32",
         "air.fmedian3.v4f16",
         "air.fast_fmax3.v2f32",
         "air.atan2.f16",

@@ -1318,8 +1318,10 @@ fn int_ref(op: IntFn, bits: u8, a: &[u64]) -> Option<u64> {
         IntFn::Min3(sg) => wrap(val(sg, 0).min(val(sg, 1)).min(val(sg, 2))),
         IntFn::Max3(sg) => wrap(val(sg, 0).max(val(sg, 1)).max(val(sg, 2))),
         IntFn::Median3(sg) => {
-            let (x, y, z) = (val(sg, 0), val(sg, 1), val(sg, 2));
-            wrap(x.min(y).max(x.max(y).min(z)))
+            // The middle of the sorted three, not the lowering's min/max formula.
+            let mut v = [val(sg, 0), val(sg, 1), val(sg, 2)];
+            v.sort_unstable();
+            wrap(v[1])
         }
         IntFn::Clamp(sg) => wrap(val(sg, 0).max(val(sg, 1)).min(val(sg, 2))),
         IntFn::MulHi(sg) => wrap(hi(sg)),
