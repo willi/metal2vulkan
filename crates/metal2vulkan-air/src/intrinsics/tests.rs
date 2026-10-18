@@ -209,12 +209,15 @@ fn math_domains_are_exclusive() {
 fn integer_median3_decodes() {
     // MSL's integer median3 is air.median3.<s|u>, and Apple's compiler emits it: the iOS 26.5 runtime's
     // metallibs call air.median3.s.i32. Regression: it was an unknown name, so a pipeline calling it failed.
-    for name in [
-        "air.median3.s.i32",
-        "air.median3.u.v4i16",
-        "air.median3.s.v3i8",
+    for (name, sign) in [
+        ("air.median3.s.i32", Sign::Signed),
+        ("air.median3.u.v4i16", Sign::Unsigned),
+        ("air.median3.s.v3i8", Sign::Signed),
     ] {
-        air(name);
+        assert!(
+            matches!(air(name), AirIntrinsic::Math(Math { f: MathFn::IMedian3(s), .. }) if s == sign),
+            "{name}"
+        );
     }
 }
 

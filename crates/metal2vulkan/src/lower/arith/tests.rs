@@ -1317,6 +1317,10 @@ fn int_ref(op: IntFn, bits: u8, a: &[u64]) -> Option<u64> {
         IntFn::Max(sg) => wrap(val(sg, 0).max(val(sg, 1))),
         IntFn::Min3(sg) => wrap(val(sg, 0).min(val(sg, 1)).min(val(sg, 2))),
         IntFn::Max3(sg) => wrap(val(sg, 0).max(val(sg, 1)).max(val(sg, 2))),
+        IntFn::Median3(sg) => {
+            let (x, y, z) = (val(sg, 0), val(sg, 1), val(sg, 2));
+            wrap(x.min(y).max(x.max(y).min(z)))
+        }
         IntFn::Clamp(sg) => wrap(val(sg, 0).max(val(sg, 1)).min(val(sg, 2))),
         IntFn::MulHi(sg) => wrap(hi(sg)),
         IntFn::MadHi(sg) => wrap(hi(sg) + u(2)),
@@ -1474,6 +1478,7 @@ fn integer_functions(part: usize, of: usize) {
             IntFn::Clamp(s),
             IntFn::Min3(s),
             IntFn::Max3(s),
+            IntFn::Median3(s),
             IntFn::MulHi(s),
             IntFn::MadHi(s),
             IntFn::MadSat(s),

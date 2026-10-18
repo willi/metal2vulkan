@@ -689,6 +689,7 @@ fn wide_integer_functions_match_metal() {
                 IntFn::Max(s),
                 IntFn::Min3(s),
                 IntFn::Max3(s),
+                IntFn::Median3(s),
                 IntFn::Clamp(s),
                 IntFn::AddSat(s),
                 IntFn::SubSat(s),
