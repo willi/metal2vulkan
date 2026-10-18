@@ -1248,6 +1248,17 @@ pub fn int_fn(
             }
             r
         }
+        IntFn::Median3(s) => {
+            // max(min(x, y), min(max(x, y), z))
+            let (x, y) = (ext(fb, s, a)?, ext_arg(fb, s, 1)?);
+            let z = ext_arg(fb, s, 2)?;
+            let c = compare(fb, lt(s), x, y)?;
+            let (lo, hi) = (sel(fb, c, x, y)?, sel(fb, c, y, x)?);
+            let c = compare(fb, lt(s), hi, z)?;
+            let hi = sel(fb, c, hi, z)?;
+            let c = compare(fb, lt(s), lo, hi)?;
+            sel(fb, c, hi, lo)?
+        }
         IntFn::Clamp(s) => {
             let x = ext(fb, s, a)?;
             let lo = ext_arg(fb, s, 1)?;

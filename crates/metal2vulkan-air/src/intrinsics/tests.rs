@@ -233,6 +233,9 @@ fn math_conversion_and_atomic_families_decode() {
         "air.clamp.u.v4i32",
         "air.max3.u.i32",
         "air.min3.s.i32",
+        // Integer `median3`. Regression: it was an unknown name, so a pipeline calling it failed.
+        "air.median3.s.i32",
+        "air.median3.u.i32",
         "air.fmedian3.v4f16",
         "air.fast_fmax3.v2f32",
         "air.atan2.f16",

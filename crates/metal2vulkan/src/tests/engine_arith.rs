@@ -666,6 +666,18 @@ fn kernels() -> Vec<Kernel> {
         // 15 * 15 - 100 = 125; 2^32 + 7 saturates at 0xFFFFFFFF.
         125 ^ 0xFFFF_FFFF,
     ));
+    // Regression: air.median3 was an unknown name, so a pipeline calling it failed to compile.
+    // -5 is the smallest signed and, as 0xFFFFFFFB, the largest unsigned: the signed median of
+    // (-5, 7, 3) is 3, the unsigned 7. The i8 call is the legalized narrow path: (-100, 9, 50) is 9.
+    v.push(k(
+        "integer_median3_by_sign",
+        format!(
+            "{}{}  %s = call i32 @air.median3.s.i32(i32 -5, i32 %a, i32 3)\n  %u = call i32 @air.median3.u.i32(i32 -5, i32 %a, i32 3)\n  %n = call i8 @air.median3.s.i8(i8 -100, i8 %b, i8 50)\n  %nw = zext i8 %n to i32\n  %x = xor i32 %s, %u\n  %h = shl i32 %nw, 8\n  %r = or i32 %h, %x\n",
+            oi("a", 7),
+            on("b", 8, 9)
+        ),
+        (9 << 8) | (3 ^ 7),
+    ));
     v.push(Kernel {
         name: "extract_bits_on_i64",
         body: format!(
@@ -924,6 +936,9 @@ declare <5 x float> @air.sincos.v5f32(<5 x float>, ptr)
 declare float @air.pow.f32(float, float)
 declare i8 @air.mad_sat.s.i8(i8, i8, i8)
 declare i32 @air.mad_sat.u.i32(i32, i32, i32)
+declare i32 @air.median3.s.i32(i32, i32, i32)
+declare i32 @air.median3.u.i32(i32, i32, i32)
+declare i8 @air.median3.s.i8(i8, i8, i8)
 declare i64 @air.mad_sat.s.i64(i64, i64, i64)
 declare i64 @air.mad_sat.u.i64(i64, i64, i64)
 declare <5 x i64> @llvm.umax.v5i64(<5 x i64>, <5 x i64>)

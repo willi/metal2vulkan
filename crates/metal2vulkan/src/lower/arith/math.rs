@@ -52,6 +52,8 @@ pub enum IntFn {
     Clamp(Sign),
     Min3(Sign),
     Max3(Sign),
+    /// The middle of three: `max(min(x, y), min(max(x, y), z))`.
+    Median3(Sign),
     MulHi(Sign),
     MadHi(Sign),
     /// `a * b + c` saturated from the exact (double-width) result.
@@ -93,6 +95,7 @@ impl IntFn {
             IntFn::Clamp(_)
             | IntFn::Min3(_)
             | IntFn::Max3(_)
+            | IntFn::Median3(_)
             | IntFn::MadHi(_)
             | IntFn::MadSat(_)
             | IntFn::ExtractBits(_)
@@ -297,6 +300,15 @@ pub fn int_fn(fb: &mut FunctionBuilder<'_>, op: IntFn, f: Form, args: &[Value]) 
                 let z = ext(fb, s, arg(args, 2)?)?;
                 r = minmax(fb, s, max, r, z)?;
             }
+            mask(fb, f, r)
+        }
+        IntFn::Median3(s) => {
+            let (x, y) = (ext(fb, s, a)?, ext(fb, s, arg(args, 1)?)?);
+            let z = ext(fb, s, arg(args, 2)?)?;
+            let lo = minmax(fb, s, false, x, y)?;
+            let hi = minmax(fb, s, true, x, y)?;
+            let hi = minmax(fb, s, false, hi, z)?;
+            let r = minmax(fb, s, true, lo, hi)?;
             mask(fb, f, r)
         }
         IntFn::Clamp(s) => {
