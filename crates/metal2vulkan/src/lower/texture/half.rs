@@ -196,10 +196,11 @@ pub enum HalfFamilies {
 
 /// Define the routine `fn(x: vec4, flags: u32, sample: bool, channel: u32) -> vec4` in `mb`
 /// (module docs; `channel` is [`TexelLanes::code`]), telling apart `families`. A module that
-/// rounds by the integer sequence (`QuantizeForm::Integer`) tells apart every family.
+/// rounds by the integer sequence (`QuantizeForm::Integer`) or through the device's conversion
+/// under `RoundingModeRTE` (`QuantizeForm::Rte`) tells apart every family.
 pub fn define(mb: &mut ModuleBuilder, families: HalfFamilies) -> BResult<FuncId> {
     let families = match mb.quantize_form() {
-        QuantizeForm::Integer => HalfFamilies::Every,
+        QuantizeForm::Integer | QuantizeForm::Rte => HalfFamilies::Every,
         QuantizeForm::Device | QuantizeForm::Converted => families,
     };
     let f32_ = mb.ty(SType::Float { width: 32 })?;
@@ -473,7 +474,7 @@ fn body(
             let takes = fb.binary(BinOp::LogicalOr, takes, ycbcr)?;
             fb.select(takes, sampled, even)?
         }
-        QuantizeForm::Integer => {
+        QuantizeForm::Integer | QuantizeForm::Rte => {
             let toward_zero = fb.binary(BinOp::LogicalAnd, sample, is_float)?;
             let away = fb.binary(BinOp::LogicalAnd, sample, is_half)?;
             let away = fb.binary(BinOp::LogicalOr, away, ycbcr)?;

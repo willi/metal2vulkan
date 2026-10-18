@@ -5733,7 +5733,6 @@ pub enum ExecutionMode {
     ContractionOff = 31,
     SubgroupUniformControlFlowKHR = 4421,
     SignedZeroInfNanPreserve = 4461,
-    #[cfg(test)]
     RoundingModeRTE = 4462,
     StencilRefReplacingEXT = 5027,
     RequireFullQuadsKHR = 5089,

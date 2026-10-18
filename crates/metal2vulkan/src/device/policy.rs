@@ -256,6 +256,13 @@ pub enum HalfRoundingPolicy {
     /// instructions a rounding, where the native forms take three: larger modules and longer
     /// pipeline creation.
     Exact,
+    /// Metal's rounding on every device, through the device's conversion to 16 bits where the
+    /// profile has `shaderFloat16`, `shaderRoundingModeRTEFloat16`,
+    /// `shaderSignedZeroInfNanPreserveFloat16` and fully independent rounding modes: the entry
+    /// declares `RoundingModeRTE` at 16 bits, which makes the conversion round to nearest even,
+    /// and the conversion and its widening are decorated `NoContraction`, so the device's compiler
+    /// keeps them. Elsewhere [`HalfRoundingPolicy::Exact`]'s integer arithmetic.
+    ExactRte,
 }
 
 /// Whose NaN a `float` or `half` result answers, and which operand Metal's minimum and maximum

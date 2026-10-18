@@ -77,7 +77,7 @@ fn choices() -> Vec<Choice> {
         choice!(p.sampling: SamplingPolicy { NativeDevice, Exact }),
         choice!(p.float_maths: FloatMathsPolicy { Native, Exact }),
         choice!(p.texel_conversion: TexelConversionPolicy { Device, Exact }),
-        choice!(p.half_rounding: HalfRoundingPolicy { Native, Exact }),
+        choice!(p.half_rounding: HalfRoundingPolicy { Native, Exact, ExactRte }),
         choice!(p.nan_and_min_max: NanMinMaxPolicy { Native, Exact }),
         choice!(p.rounding_order: RoundingOrderPolicy { Native, Exact }),
         choice!(p.half_blend: HalfBlendPolicy { Device, Exact }),

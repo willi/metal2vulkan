@@ -414,6 +414,7 @@ fn barred(m: &TypedModule) -> (usize, usize) {
             Inst::Convert {
                 op: ConvOp::FConvert,
                 a,
+                ..
             },
             Some(r),
         ) = (&n.inst, n.result)
@@ -516,4 +517,108 @@ fn a_texels_nan_is_kept_under_native_half_rounding_only_where_the_nan_switch_ask
         kept_natively > 0,
         "a profile that rounds natively and keeps texel NaNs"
     );
+}
+
+/// `HalfRoundingPolicy::ExactRte`.
+fn exact_rte() -> DevicePolicy {
+    DevicePolicy {
+        half_rounding: HalfRoundingPolicy::ExactRte,
+        ..DevicePolicy::default()
+    }
+}
+
+/// Under `HalfRoundingPolicy::ExactRte`, where no form is measured, a profile with `shaderFloat16`,
+/// the 16-bit `RoundingModeRTE` and `SignedZeroInfNanPreserve`, and rounding modes independent at
+/// every width rounds through its conversion under `RoundingModeRTE` (lavapipe); one short of any of
+/// them rounds as under `Exact` (Pascal has no 16-bit `RoundingModeRTE`; RADV's modes are independent
+/// at 32 bits only), and so does a measured form (MoltenVK's conversion). No form records a note.
+#[test]
+fn rte_half_rounding_takes_the_conversion_where_the_float_controls_allow() {
+    let cases = [
+        ("lavapipe", true),
+        ("nvidia-pascal-linux", false),
+        ("amd-780m-radv", false),
+        ("moltenvk-m3", false),
+    ];
+    for (stem, takes) in cases {
+        let p = profile(stem, exact_rte()).expect("profile");
+        let exact = profile(stem, exact_half()).expect("profile");
+        let want = if takes {
+            QuantizeForm::Rte
+        } else {
+            quantize_form(&exact)
+        };
+        assert_eq!(quantize_form(&p), want, "{stem}");
+        assert_eq!(native_rounding(&p, want), None, "{stem}");
+    }
+}
+
+/// On lavapipe under `ExactRte` each kernel's `half` rounding is the device's conversion to 16
+/// bits and back, both decorated `NoContraction` (Mesa folds an undecorated pair to the `float`
+/// itself), under the entry's `RoundingModeRTE` and `SignedZeroInfNanPreserve` at 16 bits. The
+/// module requires those float controls and rounding modes independent at every width (a 16-bit
+/// mode beside no 64-bit one), and neither measured half fact; it passes L3 and is smaller than
+/// under `Exact`. On the interpreter it answers Metal's `half(float)`.
+#[test]
+fn rte_half_rounding_declares_its_modes_and_keeps_the_pair() {
+    use crate::device::requirements::{FloatControl, FloatWidth};
+    use crate::device::Independence;
+    use crate::spirv::ir::ExecMode;
+    let Some(bc) = bitcode() else {
+        return;
+    };
+    let p = profile("lavapipe", exact_rte()).expect("profile");
+    let exact = profile("lavapipe", exact_half()).expect("profile");
+    for (name, _) in &KERNELS {
+        let (a, _, m) = compile_kept(&bc, name, &p).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        link_and_validate(&a, &p).unwrap_or_else(|e| panic!("{name}: L3: {e}"));
+        let modes = &m.entry().modes;
+        assert!(modes.contains(&ExecMode::RoundingModeRte { width: 16 }), "{name}: {modes:?}");
+        assert!(
+            modes.contains(&ExecMode::SignedZeroInfNanPreserve { width: 16 }),
+            "{name}: {modes:?}"
+        );
+        let r = &a.requirements;
+        for c in [FloatControl::RoundingModeRte, FloatControl::SignedZeroInfNanPreserve] {
+            let need = VkProperty::FloatControl(c, FloatWidth::F16);
+            assert!(r.properties.contains(&need), "{name}: {need:?}");
+        }
+        assert_eq!(r.rounding_independence, Independence::All, "{name}");
+        for fact in [VkProperty::MetalHalfConversion, VkProperty::MetalHalfQuantize] {
+            assert!(!r.properties.contains(&fact), "{name}: {fact:?}");
+        }
+        let fconverts: Vec<Contraction> = m
+            .blocks()
+            .iter()
+            .flat_map(|b| b.insts.iter())
+            .filter_map(|n| match n.inst {
+                Inst::Convert {
+                    op: ConvOp::FConvert,
+                    contract,
+                    ..
+                } => Some(contract),
+                _ => None,
+            })
+            .collect();
+        assert!(!fconverts.is_empty(), "{name}: no conversion");
+        assert!(
+            fconverts.iter().all(|c| *c == Contraction::Forbidden),
+            "{name}: {fconverts:?}"
+        );
+        let e = compile(&bc, name, &exact).unwrap_or_else(|e| panic!("{name}: exact: {e:?}"));
+        assert!(
+            a.module.words.len() < e.module.words.len(),
+            "{name}: rte {} words, exact {}",
+            a.module.words.len(),
+            e.module.words.len()
+        );
+    }
+    let run = |name: &str, x: [f32; 2]| interpret(&bc, name, &p, x);
+    let tie = 1.0 + 2f32.powi(-11);
+    assert_eq!(run("half_narrow", [tie, 0.0]), 1.0, "a tie to even");
+    assert_eq!(run("half_narrow", [65519.0, 0.0]), 65504.0);
+    assert_eq!(run("half_narrow", [65520.0, 0.0]), f32::INFINITY);
+    let denormal = 3.0 * 2f32.powi(-24);
+    assert_eq!(run("half_narrow", [denormal + 2f32.powi(-27), 0.0]), denormal, "a half denormal");
+    assert_eq!(run("half_sum", [1.0, 2f32.powi(-11)]), 1.0, "a sum");
 }

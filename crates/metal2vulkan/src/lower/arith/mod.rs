@@ -1174,8 +1174,9 @@ pub struct Declared {
 }
 
 /// Declare the arith family's module-scope objects and entry execution modes: one function per
-/// shared division routine the plan calls, and one `SignedZeroInfNanPreserve` per width the plan
-/// selected.
+/// shared division routine the plan calls, one `SignedZeroInfNanPreserve` per width the plan
+/// selected, and `RoundingModeRTE` with `SignedZeroInfNanPreserve` at 16 bits where the `half`
+/// rounding takes the device's conversion under it (`QuantizeForm::Rte`).
 pub fn declare(
     mb: &mut ModuleBuilder,
     plan: &Plan,
@@ -1183,6 +1184,14 @@ pub fn declare(
 ) -> BResult<Declared> {
     for w in &plan.families.arith.modes {
         modes.push(ExecMode::SignedZeroInfNanPreserve { width: *w });
+    }
+    // The `half` rounding through the device's conversion rounds to nearest even and keeps a
+    // zero's sign and an infinity at 16 bits (`narrow::rte`).
+    if plan.families.arith.quantize == QuantizeForm::Rte {
+        if !plan.families.arith.modes.contains(&16) {
+            modes.push(ExecMode::SignedZeroInfNanPreserve { width: 16 });
+        }
+        modes.push(ExecMode::RoundingModeRte { width: 16 });
     }
     let mut decl = Declared::default();
     for d in &plan.families.arith.divides {

@@ -219,8 +219,15 @@ pub enum Inst {
         offset: Value,
         count: Value,
     },
-    /// A conversion; the target type is the result's type.
-    Convert { op: ConvOp, a: Value },
+    /// A conversion; the target type is the result's type. `contract` is
+    /// [`Contraction::Forbidden`] only for an `FConvert` the serializer decorates `NoContraction`:
+    /// Mesa's SPIR-V reader then marks it exact, so no inexact rule folds a narrowing and its
+    /// widening away.
+    Convert {
+        op: ConvOp,
+        a: Value,
+        contract: Contraction,
+    },
     // ---- Composites (builder/ops/composite.rs) ----
     /// `OpCompositeConstruct`.
     CompositeConstruct { parts: Box<[Value]> },
@@ -1273,6 +1280,11 @@ pub enum ExecMode {
     },
     DerivativeGroupLinear,
     SignedZeroInfNanPreserve {
+        width: u8,
+    },
+    /// `RoundingModeRTE` (`SPV_KHR_float_controls`): the entry's floating-point conversions to
+    /// `width` bits round to nearest even.
+    RoundingModeRte {
         width: u8,
     },
     SubgroupUniformControlFlow,

@@ -300,8 +300,8 @@ pub enum OperandRule {
     SampledImageBlock,
     /// A call to a function whose signature does not match the arguments.
     Callee,
-    /// `NoContraction` requested on an opcode that is not float arithmetic, or on a `GLSL.std.450`
-    /// instruction other than `Fma`.
+    /// `NoContraction` requested on an opcode that is not float arithmetic, on a `GLSL.std.450`
+    /// instruction other than `Fma`, or on a conversion other than `FConvert`.
     NoContraction,
     /// An atomic's pointer is not a place: a variable, an access chain, or a texel pointer. A
     /// device address becomes one through `FunctionBuilder::device_place`.

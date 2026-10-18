@@ -51,6 +51,7 @@ use crate::device::requirements::{
     SubgroupOp, VkExtension, VkFeature, VkLimit, VkProperty,
 };
 use crate::device::subgroup::SubgroupRequirement;
+use crate::device::Independence;
 use crate::pipeline::sym::Stage;
 use crate::spirv::error::{BResult, BuildError, Dangling, GlobalRule, TypeRule};
 use crate::spirv::ids::{FuncId, GlobalId, TypeId, Value};
@@ -811,6 +812,11 @@ impl Deriver<'_> {
                     FloatControl::SignedZeroInfNanPreserve,
                     width,
                 ),
+                ExecMode::RoundingModeRte { width } => self.float_control(
+                    Cap::RoundingModeRTE,
+                    FloatControl::RoundingModeRte,
+                    width,
+                ),
                 ExecMode::PixelInterlockOrdered => {
                     self.cap(Cap::FragmentShaderPixelInterlockEXT);
                     self.ext(SpirvExtension::ExtFragmentShaderInterlock);
@@ -879,6 +885,17 @@ impl Deriver<'_> {
                 | ExecMode::OutputTriangles => {}
             }
         }
+        // The rounding-mode independence the modes need, an omitted mode a mode of its own
+        // (`roundingModeIndependence`, RuntimeSpirv VUIDs 06291-06292): 16 bits apart from 64 needs
+        // every width independent, and 32 bits apart from them the 32-bit one.
+        let rte = |width| m.entry.modes.contains(&ExecMode::RoundingModeRte { width });
+        self.r.rounding_independence = if rte(16) != rte(64) {
+            Independence::All
+        } else if rte(32) != rte(16) {
+            Independence::Only32Bit
+        } else {
+            Independence::None
+        };
         Ok(())
     }
 

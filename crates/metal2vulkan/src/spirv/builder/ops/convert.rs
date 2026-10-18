@@ -4,7 +4,7 @@ use crate::spirv::builder::function::FunctionBuilder;
 use crate::spirv::builder::ops::err;
 use crate::spirv::error::{BResult, OperandRule};
 use crate::spirv::ids::{TypeId, Value};
-use crate::spirv::ir::{ConvOp, Inst, StorageClass, Type};
+use crate::spirv::ir::{Contraction, ConvOp, Inst, StorageClass, Type};
 
 /// A bitcast endpoint: a numeric (non-`bool`) scalar or vector, or a `PhysicalStorageBuffer`
 /// pointer, with its total bit width.
@@ -28,7 +28,24 @@ impl FunctionBuilder<'_> {
     ///   width; a pointer converts only to another such pointer, a 64-bit integer, or a vector of
     ///   two 32-bit integers.
     pub fn convert(&mut self, op: ConvOp, a: Value, to: TypeId) -> BResult<Value> {
+        self.convert_with(op, a, to, Contraction::Allowed)
+    }
+
+    /// A conversion with contraction `contract` (see [`convert`](Self::convert)). Only an
+    /// `FConvert` may be [`Contraction::Forbidden`]: the serializer decorates it `NoContraction`,
+    /// which Mesa reads as exact, so its inexact fold of `f2f32(f2f16(a))` to `a` keeps the
+    /// rounding.
+    pub fn convert_with(
+        &mut self,
+        op: ConvOp,
+        a: Value,
+        to: TypeId,
+        contract: Contraction,
+    ) -> BResult<Value> {
         let o = op.to_spirv();
+        if contract == Contraction::Forbidden && op != ConvOp::FConvert {
+            return Err(err(o, OperandRule::NoContraction));
+        }
         let result = err(o, OperandRule::ResultType);
         match op {
             ConvOp::ConvertFToU
@@ -94,7 +111,14 @@ impl FunctionBuilder<'_> {
                 }
             }
         }
-        self.emit(Inst::Convert { op, a }, to)
+        self.emit(
+            Inst::Convert {
+                op,
+                a,
+                contract,
+            },
+            to,
+        )
     }
 
     fn is_psb_ptr(&self, ty: TypeId) -> BResult<bool> {

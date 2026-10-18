@@ -40,7 +40,7 @@
 //! ([`bf16_fma`]), so the final rounding is the only one that counts.
 
 use crate::budget::Meter;
-use crate::device::profile::HalfRoundingRoute;
+use crate::device::profile::{HalfRoundingRoute, Independence};
 use crate::device::DeviceProfile;
 use crate::error::{DriverDeviation, Error};
 use crate::lower::arith::legal::{FloatFmt, Form, Held};
@@ -50,7 +50,7 @@ use crate::spirv::builder::{FunctionBuilder, NarrowFmt, QuantizeForm};
 use crate::spirv::error::BResult;
 use crate::spirv::ids::Value;
 use crate::spirv::ir::{
-    BinOp, ConstBits, ConstKind, Constant, ConvOp, GlslOp, Inst, Type, TypedModule, UnOp,
+    BinOp, ConstBits, ConstKind, Constant, Contraction, ConvOp, GlslOp, Inst, Type, TypedModule, UnOp,
     ValueOrigin,
 };
 
@@ -82,6 +82,7 @@ pub fn round_words_in(q: QuantizeForm, f: Form) -> u32 {
     let lanes = u32::from(f.lanes);
     match (f.float_fmt(), q) {
         (Some(FloatFmt::Half), QuantizeForm::Integer) => 200 + 12 * lanes,
+        (Some(FloatFmt::Half), QuantizeForm::Rte) => 200 + 12 * lanes,
         (Some(FloatFmt::Half), QuantizeForm::Device | QuantizeForm::Converted) => 64 + 4 * lanes,
         (Some(FloatFmt::BFloat), _) => 96,
         _ => 0,
@@ -105,6 +106,7 @@ pub fn round(fb: &mut FunctionBuilder<'_>, f: Form, x: Value) -> BResult<Value> 
             match fb.module().quantize_form() {
                 QuantizeForm::Converted => converted(fb, wide, x),
                 QuantizeForm::Integer => integer(fb, wide, x, Below::Scaled),
+                QuantizeForm::Rte => rte(fb, wide, x, Below::Scaled),
                 QuantizeForm::Device => {
                     let q = fb.unary(UnOp::QuantizeToF16, x)?;
                     let zero = fsplat(fb, wide, 0.0)?;
@@ -141,6 +143,12 @@ pub fn quantize_form(p: &DeviceProfile) -> QuantizeForm {
         QuantizeForm::Converted
     } else if p.takes_driver_deviation(DriverDeviation::MetalHalfQuantize) {
         QuantizeForm::Device
+    } else if p.fields().half_rounding == HalfRoundingRoute::MetalRte {
+        if rte_supported(p) {
+            QuantizeForm::Rte
+        } else {
+            QuantizeForm::Integer
+        }
     } else if p.fields().half_rounding == HalfRoundingRoute::Metal {
         QuantizeForm::Integer
     } else if float16 {
@@ -291,6 +299,36 @@ fn converted(fb: &mut FunctionBuilder<'_>, wide: Form, x: Value) -> BResult<Valu
 /// bits of Metal's own conversion of that NaN.
 const BARRIER: f64 = -0.0;
 
+/// Whether profile `p` takes [`QuantizeForm::Rte`] under `HalfRoundingPolicy::ExactRte`: it has
+/// `shaderFloat16`, the entry may declare `RoundingModeRTE` and `SignedZeroInfNanPreserve` at 16
+/// bits, and its rounding modes are independent at every width, so a 16-bit mode beside no
+/// 64-bit one is valid.
+fn rte_supported(p: &DeviceProfile) -> bool {
+    let fc = p.fields().float_controls;
+    p.fields().leaf.float16
+        && fc.f16.rounding_rte
+        && fc.f16.signed_zero_inf_nan_preserve
+        && fc.rounding_independence == Independence::All
+}
+
+/// `x` (`f32` lanes of form `wide`) rounded to `half` by the device's conversion to 16 bits and
+/// its widening ([`QuantizeForm::Rte`]), each decorated `NoContraction`, under the entry's
+/// `RoundingModeRTE` at 16 bits, which makes the conversion round to nearest even. The decoration
+/// keeps the pair: Mesa marks a `NoContraction` result exact, and its fold of `f2f32(f2f16(a))`
+/// to `a` takes inexact values only.
+fn rte(fb: &mut FunctionBuilder<'_>, wide: Form, x: Value, below: Below) -> BResult<Value> {
+    let e = fb.module().ty(Type::Float { width: 16 })?;
+    let h = match wide.lanes {
+        1 => e,
+        len => fb.module().ty(Type::Vector { elem: e, len })?,
+    };
+    let w = ty(fb, wide)?;
+    let n = fb.convert_with(ConvOp::FConvert, x, h, Contraction::Forbidden)?;
+    let c = fb.convert_with(ConvOp::FConvert, n, w, Contraction::Forbidden)?;
+    let _ = below;
+    Ok(c)
+}
+
 /// Whether module `m` rounds to `half` through [`converted`]: an `OpFConvert` of an `f32` to 16
 /// bits whose result another widens back. The module then requires
 /// `VkProperty::MetalHalfConversion`. A `half` fused multiply-add on the device's 16-bit `Fma`
@@ -319,6 +357,7 @@ pub fn rounds_by_conversion(m: &TypedModule, meter: &mut Meter) -> Result<bool, 
                     Inst::Convert {
                         op: ConvOp::FConvert,
                         a,
+                        ..
                     },
                     Some(r),
                 ) => Some((*a, r)),
@@ -404,6 +443,7 @@ pub fn round_exact_below_normal(fb: &mut FunctionBuilder<'_>, f: Form, x: Value)
             match fb.module().quantize_form() {
                 QuantizeForm::Converted => converted(fb, wide, x),
                 QuantizeForm::Integer => integer(fb, wide, x, Below::Kept),
+                QuantizeForm::Rte => rte(fb, wide, x, Below::Kept),
                 QuantizeForm::Device => {
                     let q = fb.unary(UnOp::QuantizeToF16, x)?;
                     let zero = fsplat(fb, wide, 0.0)?;

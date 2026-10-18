@@ -203,6 +203,11 @@ pub enum QuantizeForm {
     /// (`DriverDeviation::MetalHalfConversion`), or under native half rounding, and the profile has
     /// `shaderFloat16`.
     Converted,
+    /// No quantize and no measured fact: `OpFConvert` to a 16-bit float and back, each decorated
+    /// `NoContraction`, under the entry's `RoundingModeRTE` at 16 bits, which makes the conversion
+    /// round to nearest even (`HalfRoundingPolicy::ExactRte`, on a profile with `shaderFloat16`
+    /// and those float controls; `narrow::rte`).
+    Rte,
 }
 
 /// A 16-bit float format the lowering holds widened in `f32`, whose bits it may note.
@@ -1414,6 +1419,7 @@ fn mode_contract(m: ExecMode) -> (u8, Option<u8>, &'static [ExecModel]) {
         ExecMode::LocalSize { .. } => (6, None, WORKGROUPS),
         ExecMode::DerivativeGroupLinear => (7, None, COMP),
         ExecMode::SignedZeroInfNanPreserve { width } => (9, Some(width), ALL),
+        ExecMode::RoundingModeRte { width } => (20, Some(width), ALL),
         ExecMode::SubgroupUniformControlFlow => (11, None, ALL),
         ExecMode::MaximallyReconverges => (12, None, ALL),
         ExecMode::Triangles | ExecMode::Quads => (13, None, TESS),

@@ -548,6 +548,10 @@ pub enum HalfRoundingRoute {
     /// (`DriverDeviation::MetalHalfConversion`, `DriverDeviation::MetalHalfQuantize`), else
     /// integer arithmetic.
     Metal,
+    /// Metal's, as [`HalfRoundingRoute::Metal`], but through the device's conversion under
+    /// `RoundingModeRTE` where the profile supports it instead of integer arithmetic
+    /// (`HalfRoundingPolicy::ExactRte`).
+    MetalRte,
     /// The device's own conversion or quantize where neither is measured to be Metal's: native
     /// half rounding (`HalfRoundingPolicy::Native`, the default), each kind recorded with its
     /// bound.

@@ -331,13 +331,16 @@ fn derive_fields(
         framebuffer_fetch: policy.framebuffer_fetch,
         texel_conversion: policy.texel_conversion,
         half_blend: policy.half_blend,
-        // Metal's where a form is measured to be Metal's or the policy asks for Metal's rounding;
-        // elsewhere the device's own.
+        // Metal's where a form is measured to be Metal's or the policy asks for Metal's rounding,
+        // through the device's conversion under `RoundingModeRTE` where it asks for that and no
+        // form is measured; elsewhere the device's own.
         half_rounding: if policy.half_rounding == HalfRoundingPolicy::Exact
             || (deviates(DriverDeviation::MetalHalfConversion) && leaf.float16)
             || deviates(DriverDeviation::MetalHalfQuantize)
         {
             HalfRoundingRoute::Metal
+        } else if policy.half_rounding == HalfRoundingPolicy::ExactRte {
+            HalfRoundingRoute::MetalRte
         } else {
             HalfRoundingRoute::Native
         },
