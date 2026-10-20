@@ -6,8 +6,8 @@ use super::sampler::decode_global;
 use super::structs::Structs;
 use super::{
     AirAbi, CompileOptions, EntryPoint, FunctionConstantDecl, LanguageVersion, LinkageSignature,
-    LinkageSignatureKind, ModuleLimits, PatchInfo, PatchKind, Stage, StaticSampler, Version,
-    VisibleFunctionRef, VisibleSymbol, VisibleTarget,
+    LinkageSignatureKind, ModuleLimits, PatchInfo, PatchKind, Stage, StaticSampler,
+    StitchingInputs, Version, VisibleFunctionRef, VisibleSymbol, VisibleTarget,
 };
 use crate::budget::Meter;
 use crate::error::Error;
@@ -209,7 +209,7 @@ pub(super) fn decode(m: &Module, meter: &mut Meter) -> Result<AirAbi, Error> {
                 }
             }
             Named::Signature => {
-                abi.linkage_signature = Some(signature(m, single(ops, &site)?, &site)?);
+                abi.linkage_signature = Some(signature(m, single(ops, &site)?, &site, cx.meter)?);
             }
         }
     }
@@ -288,12 +288,18 @@ fn compile_options(
 }
 
 /// An `!air.signature` node: `!{!"<kind>", <operands>...}`. A linked-constants or stitching
-/// signature is read by its kind and operand count. `air.rename_qualified_function_signature`
+/// signature is read by its kind and operand count, and a stitching signature's input nodes by
+/// their argument indices ([`StitchingInputs`]). `air.rename_qualified_function_signature`
 /// (Apple's compiler at macOS 14) is `!{!"<kind>", !<signature>, !"<name>"}`: the module was
 /// produced as the linked-constants or stitching signature it wraps describes, and a function
 /// renamed to the qualified name. The module's entry lists name its functions themselves, so the
 /// wrapper is read as the signature it wraps, and the name is not kept.
-fn signature(m: &Module, id: MdId, site: &Site) -> Result<LinkageSignature, Error> {
+fn signature(
+    m: &Module,
+    id: MdId,
+    site: &Site,
+    meter: &mut Meter,
+) -> Result<LinkageSignature, Error> {
     let key = Some("air.signature");
     let mut n = Ops::node(m, id, site.clone())?;
     let rename: &[u8] = b"air.rename_qualified_function_signature";
@@ -302,14 +308,19 @@ fn signature(m: &Module, id: MdId, site: &Site) -> Result<LinkageSignature, Erro
         let inner = n.child(key)?;
         n.string(key)?;
         n.finish()?;
-        return plain_signature(&mut Ops::node(m, inner, site.clone())?, site);
+        return plain_signature(m, &mut Ops::node(m, inner, site.clone())?, site, meter);
     }
-    plain_signature(&mut n, site)
+    plain_signature(m, &mut n, site, meter)
 }
 
-/// A linked-constants or stitching signature node's kind and operand count; any other kind
-/// (a rename wrapped in another) is unknown.
-fn plain_signature(n: &mut Ops<'_>, site: &Site) -> Result<LinkageSignature, Error> {
+/// A linked-constants or stitching signature node's kind and operand count, and a stitching
+/// signature's input nodes; any other kind (a rename wrapped in another) is unknown.
+fn plain_signature(
+    m: &Module,
+    n: &mut Ops<'_>,
+    site: &Site,
+    meter: &mut Meter,
+) -> Result<LinkageSignature, Error> {
     let key = Some("air.signature");
     let kind = match n.string(key)? {
         b"air.linked_constants_signature" => LinkageSignatureKind::LinkedConstants,
@@ -318,7 +329,73 @@ fn plain_signature(n: &mut Ops<'_>, site: &Site) -> Result<LinkageSignature, Err
     };
     let operands =
         u32::try_from(n.len().saturating_sub(1)).map_err(|_| site.err(AbiError::BadValue, key))?;
-    Ok(LinkageSignature { kind, operands })
+    let inputs = match (kind, n.peek()) {
+        (LinkageSignatureKind::StitchingModules, Some(Tok::Node(graph))) => {
+            stitching_inputs(m, graph, meter)?
+        }
+        _ => None,
+    };
+    Ok(LinkageSignature {
+        kind,
+        operands,
+        inputs,
+    })
+}
+
+/// The input nodes of a stitching signature's graph, its first operand: a list of nodes, each
+/// `!{!"air.stitching_input_node", i32 <argument index>, ...}` or another kind of node (a
+/// function node), which says nothing of the inputs. `None` when the list has another form, so
+/// the inputs are unknown.
+fn stitching_inputs(
+    m: &Module,
+    graph: MdId,
+    meter: &mut Meter,
+) -> Result<Option<StitchingInputs>, Error> {
+    let Some(nodes) = node_ops(m, graph) else {
+        return Ok(None);
+    };
+    // The distinct indices, charged while held.
+    let mut indices = std::collections::BTreeSet::new();
+    let mut ascending = true;
+    let read = (|| {
+        for &node in nodes {
+            meter.tick(1)?;
+            let Some(ops) = tok(m, node).and_then(|t| match t {
+                Tok::Node(id) => node_ops(m, id),
+                _ => None,
+            }) else {
+                return Ok(false);
+            };
+            let at = |i: usize| ops.get(i).and_then(|&op| tok(m, op));
+            match (at(0), at(1)) {
+                (Some(Tok::Str(b"air.stitching_input_node")), Some(Tok::Int { bits, value }))
+                    if bits <= 32 =>
+                {
+                    let Ok(index) = u32::try_from(value) else {
+                        return Ok(false);
+                    };
+                    if !indices.contains(&index) {
+                        meter.charge(std::mem::size_of::<u32>() * 2)?;
+                        indices.insert(index);
+                        ascending &= indices.last() == Some(&index);
+                    }
+                }
+                (Some(Tok::Str(b"air.stitching_input_node")), _) => return Ok(false),
+                (Some(Tok::Str(_)), _) => {}
+                _ => return Ok(false),
+            }
+        }
+        Ok::<bool, Error>(true)
+    })();
+    meter.release(indices.len() * std::mem::size_of::<u32>() * 2);
+    if !read? {
+        return Ok(None);
+    }
+    Ok(Some(StitchingInputs {
+        count: u32::try_from(indices.len()).unwrap_or(u32::MAX),
+        end: indices.last().map_or(0, |&i| i.saturating_add(1)),
+        ascending,
+    }))
 }
 
 /// `!llvm.module.flags`: `!{i32 <behavior>, !"<key>", <value>}`. The `air.max_*` limits are

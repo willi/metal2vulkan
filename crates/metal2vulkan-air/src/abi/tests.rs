@@ -2199,9 +2199,57 @@ fn visible_function_references_and_signatures() {
         abi.linkage_signature,
         Some(LinkageSignature {
             kind: LinkageSignatureKind::LinkedConstants,
-            operands: 2
+            operands: 2,
+            inputs: None,
         })
     );
+}
+
+/// A stitching signature's graph is read for its input nodes' argument indices: their count, one
+/// past the highest, and whether each first appears after every lower one. Only `0..n` in order
+/// is leading; a graph of another form has no known inputs.
+#[test]
+fn a_stitching_signature_s_inputs_are_its_input_nodes_argument_indices() {
+    let read = |indices: &[u64], other: bool| {
+        module_with(|b| {
+            let empty = node(b, &[]);
+            let mut graph: Vec<MdId> = indices
+                .iter()
+                .map(|&i| {
+                    node(
+                        b,
+                        &[S("air.stitching_input_node"), I(i), N(empty), N(empty)],
+                    )
+                })
+                .collect();
+            graph.push(node(b, &[S("air.stitching_function_node"), N(empty)]));
+            let mut ops: Vec<O<'_>> = graph.into_iter().map(N).collect();
+            if other {
+                ops.push(I(0));
+            }
+            let graph = node(b, &ops);
+            let s = node(
+                b,
+                &[S("air.stitching_modules_signature"), N(graph), N(empty)],
+            );
+            b.named_md("air.signature", &[s]);
+        })
+        .unwrap()
+        .linkage_signature
+        .and_then(|s| s.inputs)
+    };
+    // B24's custom_fn: inputs 0..5, an index read twice.
+    let leading = read(&[0, 1, 2, 1, 3, 4], false).expect("inputs");
+    assert!(leading.are_leading(5));
+    assert!(!leading.are_leading(4));
+    for indices in [&[0, 2][..], &[1, 0], &[1]] {
+        let inputs = read(indices, false).expect("inputs");
+        assert!(
+            (0..4).all(|n| !inputs.are_leading(n)),
+            "{indices:?}: {inputs:?}"
+        );
+    }
+    assert_eq!(read(&[0], true), None);
 }
 
 /// A function renamed to its qualified name after it was produced (Apple's compiler at macOS 14)
@@ -2239,6 +2287,7 @@ fn a_renamed_function_s_signature_is_the_one_it_wraps() {
     let linked = Some(LinkageSignature {
         kind: LinkageSignatureKind::LinkedConstants,
         operands: 3,
+        inputs: None,
     });
     assert_eq!(read(&|_, inner| inner).unwrap(), linked);
     assert_eq!(read(&wrap).unwrap(), linked);

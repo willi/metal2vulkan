@@ -93,7 +93,8 @@ fn caller(dead: bool) -> (Module, AirAbi) {
 }
 
 /// [`caller`] through one reference to `f` per entry of `arities`, each `i32` taking that many `i32`
-/// parameters: `*out = f(.. f(tid, ..) ..)`, each call passed the last one's result.
+/// parameters: `*out = f(.. f(tid, 101, 102, ..) ..)`, each call passed the last one's result
+/// first and the constants `101`, `102`, ... after it.
 fn caller_of(dead: bool, arities: &[usize]) -> (Module, AirAbi) {
     let mut m = ModuleBuilder::new();
     let void = m.void();
@@ -112,10 +113,17 @@ fn caller_of(dead: bool, arities: &[usize]) -> (Module, AirAbi) {
             (m.declare(&name, fty), n)
         })
         .collect();
+    let rest: Vec<Value> = (1..arities.iter().copied().max().unwrap_or(1) as u64)
+        .map(|i| m.const_int(i32t, 100 + i))
+        .collect();
     let chain = |k: &mut FunctionBuilder<'_>| {
         let mut v = arg(1);
         for &(stub, n) in &stubs {
-            v = call(k, i32t, stub, &vec![v; n]);
+            let args: Vec<Value> = std::iter::once(v)
+                .chain(rest.iter().copied())
+                .take(n)
+                .collect();
+            v = call(k, i32t, stub, &args);
         }
         v
     };
@@ -441,6 +449,7 @@ fn linked_module_features_not_implemented_are_refused_at_the_call() {
     code(&mut signature).abi.linkage_signature = Some(crate::abi::LinkageSignature {
         kind: crate::abi::LinkageSignatureKind::LinkedConstants,
         operands: 0,
+        inputs: None,
     });
     let mut init = callee("f", &[]);
     let mut parts = code(&mut init).module.clone().into_parts();
@@ -459,62 +468,224 @@ fn linked_module_features_not_implemented_are_refused_at_the_call() {
     }
 }
 
-/// A stitched function takes one parameter per input node its graph reads, while the reference
-/// names the whole visible-function type: RenderBox's `custom_effect_fragment` passes 7 arguments
-/// to a stitched `custom_fn` of 5 (B24). The reference resolves when its parameters start with the
-/// definition's, the rest unread. Another module of that type, or a stitched definition whose
-/// parameters are not the reference's leading ones, is still another signature.
+/// `l` as a stitched module whose graph's input nodes name the arguments `indices`, in that order.
+fn stitched_at(mut l: LinkedModule, indices: &[u32]) -> LinkedModule {
+    use crate::abi::{LinkageSignature, LinkageSignatureKind, StitchingInputs};
+    let mut seen: Vec<u32> = Vec::new();
+    let mut ascending = true;
+    for &i in indices {
+        if !seen.contains(&i) {
+            ascending &= seen.iter().all(|&s| s < i);
+            seen.push(i);
+        }
+    }
+    code(&mut l).abi.linkage_signature = Some(LinkageSignature {
+        kind: LinkageSignatureKind::StitchingModules,
+        operands: 2,
+        inputs: Some(StitchingInputs {
+            count: seen.len() as u32,
+            end: seen.iter().max().map_or(0, |&i| i + 1),
+            ascending,
+        }),
+    });
+    l
+}
+
+/// [`stitched_at`] for the leading argument alone, the input of [`callee`]'s one parameter.
+fn stitched(l: LinkedModule) -> LinkedModule {
+    stitched_at(l, &[0])
+}
+
+/// A stitched function takes the inputs its graph reads, while the reference names the whole
+/// visible-function type: RenderBox's `custom_effect_fragment` passes 7 arguments to a stitched
+/// `custom_fn` of 5 (B24). The reference resolves through an adapter that passes the definition
+/// the reference's leading arguments, and drops the rest.
 #[test]
 fn a_stitched_function_of_fewer_parameters_resolves_the_reference() {
-    use crate::abi::{LinkageSignature, LinkageSignatureKind};
-    let stitched = |mut l: LinkedModule| {
-        code(&mut l).abi.linkage_signature = Some(LinkageSignature {
-            kind: LinkageSignatureKind::StitchingModules,
-            operands: 2,
-        });
-        l
-    };
-    let run = |l: LinkedModule| {
-        // `*out = f(tid, tid)` through a reference `i32 (i32, i32)`.
-        let (module, abi) = caller_of(false, &[2]);
-        specialize_linked(module, &abi, &request(), &[l], &mut meter())
-    };
-    let e = run(stitched(callee("f", &[]))).unwrap_or_else(|e| panic!("{e}"));
+    // `*out = f(tid, 101)` through a reference `i32 (i32, i32)`: f's `x * 3 + table[x & 3]` of
+    // `tid`; 101 is passed nowhere. A trailing argument passed in its place would fold to
+    // constants.
+    let (module, abi) = caller_of(false, &[2]);
+    let e = specialize_linked(
+        module,
+        &abi,
+        &request(),
+        &[stitched(callee("f", &[]))],
+        &mut meter(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
     let t = text(&e);
     assert!(!t.contains("call "), "{t}");
     assert!(t.contains("mul i32"), "{t}");
+    assert!(!t.contains("101"), "{t}");
     // The definition keeps its own type, so references of both types resolve, in either order:
     // widening the import in place would refuse whichever reference came second.
     for arities in [[2, 1], [1, 2]] {
         let (module, abi) = caller_of(false, &arities);
-        let e = specialize_linked(
-            module,
-            &abi,
-            &request(),
-            &[stitched(callee("f", &[]))],
-            &mut meter(),
-        )
-        .unwrap_or_else(|e| panic!("{arities:?}: {e}"));
+        let linked = [stitched(callee("f", &[]))];
+        let e = specialize_linked(module, &abi, &request(), &linked, &mut meter())
+            .unwrap_or_else(|e| panic!("{arities:?}: {e}"));
         let t = text(&e);
         assert!(!t.contains("call "), "{arities:?}: {t}");
         assert_eq!(t.matches("mul i32").count(), 2, "{arities:?}: {t}");
     }
-    let signature = Error::InvalidRequest(RequestError::LinkedFunction {
+}
+
+/// A wider reference resolves only to a stitched function whose parameters are provably the
+/// reference's leading arguments: the module is stitched, the definition's type is the reference's
+/// with only its leading parameters, and the graph's input nodes are exactly those arguments in
+/// order. Anything else is another signature, so no argument is guessed.
+#[test]
+fn a_wider_reference_to_another_function_is_another_signature() {
+    let run = |l: LinkedModule| {
+        let (module, abi) = caller_of(false, &[2]);
+        specialize_linked(module, &abi, &request(), &[l], &mut meter()).map(|_| ())
+    };
+    let signature = Err(Error::InvalidRequest(RequestError::LinkedFunction {
         name: DiagName::new("f"),
         problem: LinkProblem::Signature,
-    });
-    assert_eq!(run(callee("f", &[])).unwrap_err(), signature);
-    // A stitched `i64 (i64)`: not the reference's leading parameter.
+    }));
+    assert_eq!(run(callee("f", &[])), signature, "not stitched");
+    // Stitched `i32 (i64)`: its one parameter is not the reference's leading `i32`.
     let mut m = ModuleBuilder::new();
-    let i64t = m.int(64);
-    let fty = m.fn_ty(i64t, &[i64t]);
+    let (i32t, i64t) = (m.int(32), m.int(64));
+    let fty = m.fn_ty(i32t, &[i64t]);
     let mut f = m.define("f", fty);
-    f.ret(Some(arg(0)));
+    let v = f.push(
+        i32t,
+        InstKind::Cast {
+            op: crate::ir::CastOp::Trunc,
+            v: arg(0),
+        },
+    );
+    f.ret(Some(v));
     let func = f.finish();
-    let mut other = callee("f", &[]);
-    code(&mut other).module = m.finish().unwrap();
-    code(&mut other).abi.visible_functions = vec![visible(func, "f")];
-    assert_eq!(run(stitched(other)).unwrap_err(), signature);
+    let mut wide = callee("f", &[]);
+    code(&mut wide).module = m.finish().unwrap();
+    code(&mut wide).abi.visible_functions = vec![visible(func, "f")];
+    assert_eq!(run(stitched(wide)), signature, "i32 (i64)");
+    // Input nodes the definition's parameter may not be argument 0 of: argument 1 alone, the
+    // arguments {0, 2} (a parameter per input read, or per argument up to the highest, is
+    // unmeasured), and the arguments {1, 0} in that order.
+    for indices in [&[1][..], &[0, 2], &[1, 0]] {
+        assert_eq!(
+            run(stitched_at(callee("f", &[]), indices)),
+            signature,
+            "{indices:?}"
+        );
+    }
+    // A signature whose graph is of another form: the inputs are unknown.
+    let mut unknown = stitched(callee("f", &[]));
+    if let Some(s) = &mut code(&mut unknown).abi.linkage_signature {
+        s.inputs = None;
+    }
+    assert_eq!(run(unknown), signature, "inputs unknown");
+}
+
+/// An adapter stands for its definition: one linked frame, however many references of other
+/// types reach it, and one address. Guards a measured miscount: an adapter counted as a linked
+/// function of its own, which calls a linked function, refused pipelines Metal makes
+/// (`CallStackBytes`) at these depths.
+#[test]
+fn an_adapter_is_its_definition_s_frame_and_address() {
+    let depth = |arities: &[usize], linked: &[LinkedModule], k: u32| {
+        let (module, abi) = caller_of(false, arities);
+        let request = SpecRequest {
+            call_stack_depth: k,
+            ..request()
+        };
+        specialize_linked(module, &abi, &request, linked, &mut meter()).map(|_| ())
+    };
+    // A leaf f, at both widths.
+    assert_eq!(depth(&[2, 1], &[stitched(callee("f", &[]))], 16359), Ok(()));
+    // f calling g, at one wider width twice.
+    let calling = [stitched(callee("f", &["g"])), callee("g", &[])];
+    assert_eq!(depth(&[2, 2], &calling, 8180), Ok(()));
+
+    // `fp = tid & 1 ? &f as i32 (i32, i32) : &f as i32 (i32)`, `*out = (fp == &f as i32 (i32, i32))
+    // + fp(tid)`: one function, so one word, whichever reference took its address (as Metal
+    // compares one function); the pointer's choice, its comparison and the call's switch fold.
+    let mut m = ModuleBuilder::new();
+    let void = m.void();
+    let (i1, i32t) = (m.int(1), m.int(32));
+    let dev = m.ptr(AddrSpace::Device);
+    let thread = m.ptr(AddrSpace::Thread);
+    let wide = m.fn_ty(i32t, &[i32t, i32t]);
+    let narrow = m.fn_ty(i32t, &[i32t]);
+    let s2 = m.declare("f.MTL_VISIBLE_FN_REF", wide);
+    let s1 = m.declare("f.MTL_VISIBLE_FN_REF.1", narrow);
+    let a2 = Value::Const(m.constant(thread, Const::FuncAddr(s2)));
+    let a1 = Value::Const(m.constant(thread, Const::FuncAddr(s1)));
+    let (zero, one) = (m.const_int(i32t, 0), m.const_int(i32t, 1));
+    let kty = m.fn_ty(void, &[dev, i32t]);
+    let mut k = m.define("k", kty);
+    let low = k.bin(BinOp::And, arg(1), one);
+    let odd = k.push(
+        i1,
+        InstKind::ICmp {
+            pred: crate::ir::IntPredicate::Ne,
+            a: low,
+            b: zero,
+        },
+    );
+    let fp = k.push(
+        thread,
+        InstKind::Select {
+            c: odd,
+            t: a2,
+            f: a1,
+            fmf: FastMath::NONE,
+        },
+    );
+    let same = k.push(
+        i1,
+        InstKind::ICmp {
+            pred: crate::ir::IntPredicate::Eq,
+            a: fp,
+            b: a2,
+        },
+    );
+    let same = k.push(
+        i32t,
+        InstKind::Cast {
+            op: crate::ir::CastOp::ZExt,
+            v: same,
+        },
+    );
+    let r = k.push(
+        i32t,
+        InstKind::Call(Box::new(Call {
+            callee: Callee::Indirect {
+                callee: fp,
+                fn_ty: narrow,
+            },
+            args: vec![arg(1)].into(),
+            fmf: FastMath::NONE,
+            tail: TailKind::None,
+            attrs: None,
+            range: None,
+        })),
+    );
+    let r = k.bin(BinOp::Add, same, r);
+    store(&mut k, r, arg(0));
+    k.ret(None);
+    let kf = k.finish();
+    let module = m.finish().unwrap();
+    let (_, mut abi) = caller(false);
+    abi.entries[0].func = kf;
+    abi.visible_function_refs = vec![reference(s2, "f"), reference(s1, "f")];
+    let e = specialize_linked(
+        module,
+        &abi,
+        &request(),
+        &[stitched(callee("f", &[]))],
+        &mut meter(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let t = text(&e);
+    for chose in ["icmp", "select", "switch", "call "] {
+        assert!(!t.contains(chose), "{chose}:\n{t}");
+    }
 }
 
 /// A call to a declaration no reference names is still a function to link from a dynamic
@@ -616,6 +787,79 @@ fn a_struct_of_another_name_and_the_same_body_is_the_same_type() {
     assert!(t.contains("mul i32"), "{t}");
     assert!(t.contains("; \"pair.153\""), "{t}");
     assert!(!t.contains("; \"pair\""), "{t}");
+}
+
+/// A stitched definition imports paired with the reference's leading parameters, so its struct is
+/// the reference's even where the caller has an earlier struct of the same body, which an unpaired
+/// import would take (and the adapter's call would then need a conversion: refused).
+#[test]
+fn a_stitched_definition_s_struct_is_the_wider_reference_s() {
+    // Caller: `*out = f(tid, 101).0`, `f` returning `"b"`, with `"a"` of the same body before it.
+    let mut m = ModuleBuilder::new();
+    let void = m.void();
+    let i32t = m.int(32);
+    let dev = m.ptr(AddrSpace::Device);
+    pair_ty(&mut m, "a");
+    let b = pair_ty(&mut m, "b");
+    let fty = m.fn_ty(b, &[i32t, i32t]);
+    let stub = m.declare("f.MTL_VISIBLE_FN_REF", fty);
+    let other = m.const_int(i32t, 101);
+    let kty = m.fn_ty(void, &[dev, i32t]);
+    let mut k = m.define("k", kty);
+    let v = call(&mut k, b, stub, &[arg(1), other]);
+    let x = k.push(
+        i32t,
+        InstKind::ExtractValue {
+            agg: v,
+            indices: vec![0].into(),
+        },
+    );
+    store(&mut k, x, arg(0));
+    k.ret(None);
+    let kf = k.finish();
+    let (_, mut abi) = caller(false);
+    abi.entries[0].func = kf;
+    abi.visible_function_refs = vec![reference(stub, "f")];
+    let module = m.finish().unwrap();
+
+    // Stitched `f(x) = {x * 3, x}` returning `"d"`.
+    let mut m = ModuleBuilder::new();
+    let i32t = m.int(32);
+    let d = pair_ty(&mut m, "d");
+    let fty = m.fn_ty(d, &[i32t]);
+    let three = m.const_int(i32t, 3);
+    let undef = Value::Const(m.constant(d, Const::Undef));
+    let mut f = m.define("f", fty);
+    let x3 = f.bin(BinOp::Mul, arg(0), three);
+    let p = f.push(
+        d,
+        InstKind::InsertValue {
+            agg: undef,
+            val: x3,
+            indices: vec![0].into(),
+        },
+    );
+    let p = f.push(
+        d,
+        InstKind::InsertValue {
+            agg: p,
+            val: arg(0),
+            indices: vec![1].into(),
+        },
+    );
+    f.ret(Some(p));
+    let func = f.finish();
+    let lf = stitched(linked(
+        "f",
+        m.finish().unwrap(),
+        abi_with_visible(func, "f"),
+    ));
+    let e = specialize_linked(module, &abi, &request(), &[lf], &mut meter())
+        .unwrap_or_else(|e| panic!("{e}"));
+    let t = text(&e);
+    assert!(!t.contains("call "), "{t}");
+    assert!(t.contains("mul i32"), "{t}");
+    assert!(!t.contains("101"), "{t}");
 }
 
 /// The ABI of a linked module exporting `func` as `name`.

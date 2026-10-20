@@ -1286,18 +1286,50 @@ pub enum LinkageSignatureKind {
     StitchingModules,
 }
 
-/// `!air.signature`. Only its kind and operand count are decoded. It describes how a closed
-/// module was produced (the constants a linked-constants module was specialized with, the graph
-/// a stitched module was built from); the module's own code is what runs. A linked-constants module
-/// that still declares function constants is refused (`Feature::Linking`), as is a linked function's
-/// linked-constants module. A linked function's stitched module links, through an adapter when the
-/// reference has more parameters than the stitched function (`canon::link`). An
+/// `!air.signature`: its kind, its operand count, and a stitching signature's input nodes. It
+/// describes how a closed module was produced (the constants a linked-constants module was
+/// specialized with, the graph a stitched module was built from); the module's own code is what
+/// runs. What linking accepts of each kind is `canon::link`'s. An
 /// `air.rename_qualified_function_signature` (a function renamed to its qualified name after it
 /// was produced) is read as the signature it wraps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LinkageSignature {
     /// Which signature the node's leading string names.
     pub kind: LinkageSignatureKind,
-    /// The number of operands after that string (not decoded).
+    /// The number of operands after that string.
     pub operands: u32,
+    /// A stitching signature's input nodes, when its graph (the first operand) is a list of nodes;
+    /// `None` for a linked-constants signature and for a graph of another form.
+    pub inputs: Option<StitchingInputs>,
+}
+
+impl LinkageSignature {
+    /// Whether it is of `kind`.
+    pub fn is(&self, kind: LinkageSignatureKind) -> bool {
+        self.kind == kind
+    }
+}
+
+/// The input nodes of a stitching signature's graph (`air.stitching_input_node`, one per
+/// `MTLFunctionStitchingInputNode`), by the argument index each names: how many distinct indices,
+/// one past the highest, and whether each first appears after every lower one in the graph's
+/// list. Indices `0..end` all present, in that order, is the one form whose parameter list is known
+/// for a stitched function of `end` parameters: those arguments, in order, whether its compiler
+/// numbers a parameter by argument index or by the inputs the graph reads (by index or by node
+/// order). Any other form would need Apple's numbering measured (a graph reading inputs {0, 2}).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct StitchingInputs {
+    /// The number of distinct argument indices.
+    pub count: u32,
+    /// One past the highest argument index (0 with no input node).
+    pub end: u32,
+    /// Whether the distinct indices first appear in ascending order.
+    pub ascending: bool,
+}
+
+impl StitchingInputs {
+    /// Whether the inputs are exactly the arguments `0..n`, listed in that order.
+    pub fn are_leading(&self, n: usize) -> bool {
+        self.ascending && self.count == self.end && usize::try_from(self.end).is_ok_and(|e| e == n)
+    }
 }

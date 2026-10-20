@@ -520,7 +520,7 @@ fn prepare_in(
     let addressed: BTreeSet<FuncId> = taken_any.union(&taken_stubs).copied().collect();
     m.charge(addressed.len() * std::mem::size_of::<FuncId>() * 2)?;
     *held += addressed.len() * std::mem::size_of::<FuncId>() * 2;
-    let words = FunctionWords::new(parts, candidates, &addressed, first_own, m)?;
+    let words = FunctionWords::new(parts, stubs, candidates, &addressed, first_own, m)?;
     let sccs = Sccs::compute(&g, m)?;
     let ledger = sccs.ledger_bytes();
     let reached = Reached {
