@@ -370,8 +370,9 @@ fn a_table_call_is_a_switch_over_the_candidates_of_its_type() {
 }
 
 /// A stitched function in a table, called at the wider visible-function type its graph's unread
-/// inputs leave out (B24's custom_fn shape), is a case through its adapter; a non-stitched one of
-/// that type is no case. Guards a silent wrong result: the call reaching the default.
+/// inputs leave out (B24's custom_fn shape), is a case through its adapter; a non-stitched one
+/// is no case, so the call has no candidate. Guards a silent wrong result: the stitched call
+/// reaching the default.
 #[test]
 fn a_stitched_candidate_of_fewer_parameters_is_a_case_of_a_wider_table_call() {
     use crate::abi::{LinkageSignature, LinkageSignatureKind};
@@ -394,11 +395,22 @@ fn a_stitched_candidate_of_fewer_parameters_is_a_case_of_a_wider_table_call() {
         .lines()
         .find(|l| l.contains("switch "))
         .unwrap_or_else(|| panic!("no switch:\n{text}"));
-    assert!(switch.contains(" 2: bb") && switch.contains(" 3: bb"), "{switch}");
+    assert!(
+        switch.contains(" 2: bb") && switch.contains(" 3: bb"),
+        "{switch}"
+    );
     assert!(!text.contains("call "), "the adapters are inlined:\n{text}");
-    assert!(text.contains("add i32") && text.contains("mul i32"), "{text}");
-    let text = print(&run(false).unwrap_or_else(|e| panic!("{e}")).module);
-    assert!(!text.contains("add i32") && !text.contains("mul i32"), "{text}");
+    assert!(
+        text.contains("add i32") && text.contains("mul i32"),
+        "{text}"
+    );
+    // Unstitched, no candidate is of the call's type: the call has none to answer it.
+    assert_eq!(
+        run(false).map(|_| ()),
+        Err(Error::NeedsInput(MissingInput::VisibleFunctionTable {
+            buffer: Some(1)
+        }))
+    );
 }
 
 /// A table call no candidate of its type answers needs the pipeline's linked functions, unless

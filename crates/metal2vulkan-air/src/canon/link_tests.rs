@@ -487,8 +487,14 @@ fn a_stitched_function_of_fewer_parameters_resolves_the_reference() {
     // widening the import in place would refuse whichever reference came second.
     for arities in [[2, 1], [1, 2]] {
         let (module, abi) = caller_of(false, &arities);
-        let e = specialize_linked(module, &abi, &request(), &[stitched(callee("f", &[]))], &mut meter())
-            .unwrap_or_else(|e| panic!("{arities:?}: {e}"));
+        let e = specialize_linked(
+            module,
+            &abi,
+            &request(),
+            &[stitched(callee("f", &[]))],
+            &mut meter(),
+        )
+        .unwrap_or_else(|e| panic!("{arities:?}: {e}"));
         let t = text(&e);
         assert!(!t.contains("call "), "{arities:?}: {t}");
         assert_eq!(t.matches("mul i32").count(), 2, "{arities:?}: {t}");

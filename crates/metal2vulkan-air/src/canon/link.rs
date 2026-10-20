@@ -809,10 +809,20 @@ pub(super) fn stitched_adapter(
     funcs: &mut Arena<FuncId, Function>,
     m: &mut Meter,
 ) -> Result<Option<FuncId>, Error> {
-    use crate::ir::{ArgIdx, Block, Body, Call, FastMath, Inst, InstId, Param, TailKind, Type, Value};
+    use crate::ir::{
+        ArgIdx, Block, Body, Call, FastMath, Inst, InstId, Param, TailKind, Type, Value,
+    };
     let (
-        Some(Type::Function { ret: r0, params: p0, vararg: false }),
-        Some(Type::Function { ret: r1, params: p1, vararg: false }),
+        Some(Type::Function {
+            ret: r0,
+            params: p0,
+            vararg: false,
+        }),
+        Some(Type::Function {
+            ret: r1,
+            params: p1,
+            vararg: false,
+        }),
     ) = (types.get(got), types.get(want))
     else {
         return Ok(None);
