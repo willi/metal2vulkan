@@ -903,7 +903,11 @@ pub enum Feature {
     Recursion,
     /// Indirect calls, function pointers, visible/intersection function tables (one variant).
     DynamicCall,
-    /// Linkage signatures / stitching / dynamic libraries.
+    /// Linking a form not implemented yet: a linked function's or dynamic library's module with
+    /// function constants, a static initializer, a global it only declares, or a linkage signature
+    /// (any, on a dynamic library; a linked-constants one, on a linked function); a definition of
+    /// the reference's type only up to struct identity; a linked-constants module that declares
+    /// constants; and a call to a declaration no linked function or dynamic import supplies.
     Linking,
 
     // ---- Control flow and simdgroups ----

@@ -11,7 +11,14 @@
 //! `Recursion`. Types map as LLVM's IR linker maps them: the definition's type pairs with the
 //! stub's structurally, identified structs by body whatever their names (the Metal compiler numbers
 //! a struct `%struct.T.153` in one module and `%struct.T` in another), and any other identified
-//! struct is the module's first struct of the same body.
+//! struct is the module's first struct of the same body. A stitched module's one visible function
+//! (its module has `air.stitching_modules_signature`) takes one parameter per input node its graph
+//! reads, and the reference may name more. When the graph's inputs are provably the reference's
+//! leading arguments (they are exactly `0..n`, listed in that order, for a definition of `n`
+//! parameters: [`StitchingInputs::are_leading`]), the stub resolves to an internal adapter of the
+//! reference's type that passes the definition those arguments; the definition keeps its own type,
+//! and the adapter is cached by definition and type, and is its definition's frame and address
+//! ([`Stubs::definition`]). Any other graph is another signature ([`conform`]).
 //!
 //! Nothing here refuses: a call to a stub may be dead once constants are bound, and Metal links
 //! what the specialized function calls. Each stub that is not resolved keeps a [`Stub`] state,
@@ -19,7 +26,8 @@
 //! no linked function has its name, and otherwise the reason the named function cannot resolve
 //! it (another function type, a function that is not visible, two linked functions of that name,
 //! another data layout, or a module feature linking does not implement yet: function constants,
-//! a static initializer, a linkage signature, or a global it only declares and does not import).
+//! a static initializer, a linked-constants signature, or a global it only declares and does not
+//! import). A dynamic library with any linkage signature, stitched included, is not implemented.
 //!
 //! When the entry takes a visible-function table, every function the pipeline can place in one (a
 //! [`LinkedName`] with a table word) is imported the same way, after the stubs, as a [`Candidate`]
@@ -46,13 +54,14 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use crate::abi::{AirAbi, SamplerState, StaticSampler, VisibleSymbol};
+use crate::abi::VisibleSymbol;
+use crate::abi::{AirAbi, LinkageSignatureKind, SamplerState, StaticSampler, StitchingInputs};
 use crate::budget::Meter;
 use crate::error::{DiagName, Location};
 use crate::error::{Error, Feature, LinkProblem, MissingInput, RequestError, Unsupported};
 use crate::ir::{Arena, Callee, Const, ConstId, ConstTable, DataLayout, FuncId, Function, Global};
 use crate::ir::{GlobalId, Idx, InstKind, Linkage, Module, ModuleParts, Section, Symbols};
-use crate::ir::{TypeId, TypeTable, Visibility};
+use crate::ir::{Type, TypeId, TypeTable, Visibility};
 
 use super::renumber::{bodies, inst_refs, isomorphism, Bodies, Renumber, Syms};
 use super::rewrite::{filled, invariant, scoped};
@@ -93,6 +102,8 @@ pub(super) struct Candidate {
     pub word: u32,
     pub name: Box<[u8]>,
     pub def: Result<FuncId, Unimported>,
+    /// Which calls of another type may call it ([`conform`], [`may_call`]).
+    pub rule: CallRule,
 }
 
 /// Why a [`Candidate`] was not imported, and which calls it could answer.
@@ -175,6 +186,10 @@ pub(super) struct Stubs {
     refused: BTreeMap<Item, Error>,
     /// Why an install name was not loaded, when one was not (`DynamicLinks::unloaded`).
     unloaded: Option<Error>,
+    /// Each adapter made for a linked definition and a call type ([`conform`]), by both.
+    adapters: BTreeMap<(FuncId, TypeId), FuncId>,
+    /// Each adapter's definition.
+    adapted: BTreeMap<FuncId, FuncId>,
 }
 
 impl Stubs {
@@ -215,12 +230,37 @@ impl Stubs {
         })
     }
 
-    /// The linked definitions the stubs resolved to.
+    /// The linked definitions the stubs resolved to: an adapter's definition for a stub resolved
+    /// to an adapter ([`Stubs::definition`]).
     pub fn resolved(&self) -> impl Iterator<Item = FuncId> + '_ {
         self.of.values().filter_map(|s| match s {
-            Stub::Resolved(f) => Some(*f),
+            Stub::Resolved(f) => Some(self.definition(*f)),
             Stub::Missing(_) | Stub::Refused(_) => None,
         })
+    }
+
+    /// The function `f` stands for: the linked definition when `f` is an adapter of one
+    /// ([`conform`]), else `f`. One Metal function is one linked frame and one function word,
+    /// whatever type a call reaches it at.
+    pub fn definition(&self, f: FuncId) -> FuncId {
+        self.adapted.get(&f).copied().unwrap_or(f)
+    }
+
+    /// The adapter of `def` for calls of type `want`, made at the first ask.
+    fn adapter(
+        &mut self,
+        (def, want): (FuncId, TypeId),
+        dest: (&mut Symbols, &mut TypeTable, &mut Arena<FuncId, Function>),
+        m: &mut Meter,
+    ) -> Result<FuncId, Error> {
+        if let Some(&a) = self.adapters.get(&(def, want)) {
+            return Ok(a);
+        }
+        let a = stitched_adapter(def, want, dest, m)?;
+        m.charge(std::mem::size_of::<((FuncId, TypeId), FuncId)>() * 2)?;
+        self.adapters.insert((def, want), a);
+        self.adapted.insert(a, def);
+        Ok(a)
     }
 
     /// Record the declaration `f` as one whose surviving call is refused with `e` (a candidate a
@@ -525,6 +565,7 @@ fn link_in(
                         word,
                         name: f.name.clone(),
                         def,
+                        rule: call_rule(l),
                     });
                 }
             }
@@ -552,6 +593,17 @@ fn link_in(
                             .get(stub)
                             .map(|f| f.ty)
                             .ok_or_else(|| invariant("a stub out of range"))?;
+                        // A definition its rule lets the reference reach at its leading
+                        // parameters pairs with those, so its structs map to the reference's.
+                        let arity = source_type(l, &f.name, m)?.and_then(|t| {
+                            let code = l.code.as_ref().ok()?;
+                            arity(&code.module.parts().types, t)
+                        });
+                        let want = match arity {
+                            Some(n) => leading_type(call_rule(l), n, want, &mut tables.types, m)?
+                                .unwrap_or(want),
+                            None => want,
+                        };
                         let brought = Brought {
                             layout: &data_layout,
                             samplers: &mut samplers,
@@ -583,17 +635,20 @@ fn link_in(
                                 .map(|f| f.ty)
                                 .ok_or_else(|| invariant("a linked function out of range"))
                         };
-                        let (want, got) = (ty(stub)?, ty(def)?);
-                        let types = (&tables.types, &tables.types);
-                        if want == got {
-                            Stub::Resolved(def)
-                        } else if isomorphism(types, (got, want), |_| None, m)?.is_some() {
+                        let want = ty(stub)?;
+                        let dest = (&mut tables.symbols, &mut tables.types, &mut funcs);
+                        match conform((def, call_rule(l)), want, dest, &mut stubs, m)? {
+                            Conformance::Exact => Stub::Resolved(def),
+                            Conformance::Adapted(adapter) => Stub::Resolved(adapter),
                             // Another reference to a definition already imported for a reference
                             // of a different but isomorphic type (two identified structs of one
                             // body): the call would need the value converted between them.
-                            Stub::Refused(not_implemented(&symbol.0, "type"))
-                        } else {
-                            Stub::Refused(link_problem(&symbol.0, LinkProblem::Signature))
+                            Conformance::Isomorphic => {
+                                Stub::Refused(not_implemented(&symbol.0, "type"))
+                            }
+                            Conformance::Other => {
+                                Stub::Refused(link_problem(&symbol.0, LinkProblem::Signature))
+                            }
                         }
                     }
                 }
@@ -764,6 +819,237 @@ fn import_linked(
     }
 }
 
+/// Which calls a linked module's function may answer besides those of its own type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CallRule {
+    /// Only calls of its own type (up to struct identity, which needs a conversion).
+    Exact,
+    /// A stitched module's one visible function (`air.stitching_modules_signature`), with its
+    /// graph's input nodes when the signature lists them: also a call whose return is its return and
+    /// whose parameters start with its own, the rest unread, where the inputs are exactly the
+    /// arguments `0..n` of its `n` parameters ([`StitchingInputs::are_leading`]). Apple's stitched
+    /// function takes the graph's inputs, while the reference names the whole visible-function type
+    /// (RenderBox's `custom_effect_fragment` calls a 5-input `custom_fn` with 7 arguments).
+    Stitched(Option<StitchingInputs>),
+}
+
+/// The [`CallRule`] of `l`'s functions.
+pub(super) fn call_rule(l: &LinkedModule) -> CallRule {
+    let Ok(code) = &l.code else {
+        return CallRule::Exact;
+    };
+    match code.abi.linkage_signature {
+        Some(s) if s.is(LinkageSignatureKind::StitchingModules) => {
+            if code.abi.visible_functions.len() == 1 {
+                CallRule::Stitched(s.inputs)
+            } else {
+                CallRule::Exact
+            }
+        }
+        _ => CallRule::Exact,
+    }
+}
+
+/// What a call of type `want` makes of a linked definition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Conformance {
+    /// It is of the call's type.
+    Exact,
+    /// Its [`CallRule`] lets the call reach it through this adapter of the call's type.
+    Adapted(FuncId),
+    /// Of the call's type, or the call's leading parameters, up to struct identity: the call would
+    /// need its values converted.
+    Isomorphic,
+    /// Another type.
+    Other,
+}
+
+/// The function type a call of type `want` passes a definition of `n` parameters under
+/// `rule`: `want` with only its first `n` parameters, when `rule` lets such a call reach it and
+/// `want` has more.
+fn leading_type(
+    rule: CallRule,
+    n: usize,
+    want: TypeId,
+    types: &mut TypeTable,
+    m: &mut Meter,
+) -> Result<Option<TypeId>, Error> {
+    let CallRule::Stitched(Some(inputs)) = rule else {
+        return Ok(None);
+    };
+    if !inputs.are_leading(n) {
+        return Ok(None);
+    }
+    let Some(Type::Function {
+        ret,
+        params,
+        vararg: false,
+    }) = types.get(want)
+    else {
+        return Ok(None);
+    };
+    if params.len() <= n {
+        return Ok(None);
+    }
+    let prefix = Type::Function {
+        ret: *ret,
+        params: params.get(..n).unwrap_or_default().into(),
+        vararg: false,
+    };
+    types.intern(prefix, m).map(Some)
+}
+
+/// The parameter count of function type `ty` in `types`.
+fn arity(types: &TypeTable, ty: TypeId) -> Option<usize> {
+    match types.get(ty) {
+        Some(Type::Function { params, .. }) => Some(params.len()),
+        _ => None,
+    }
+}
+
+/// What a call of type `want` makes of the linked definition `def` of rule `rule`; an adapter is
+/// made once per definition and type ([`Stubs::adapter`]). The rule of linking and of a table
+/// call alike.
+pub(super) fn conform(
+    (def, rule): (FuncId, CallRule),
+    want: TypeId,
+    (symbols, types, funcs): (&mut Symbols, &mut TypeTable, &mut Arena<FuncId, Function>),
+    stubs: &mut Stubs,
+    m: &mut Meter,
+) -> Result<Conformance, Error> {
+    let got = funcs
+        .get(def)
+        .map(|f| f.ty)
+        .ok_or_else(|| invariant("a linked function out of range"))?;
+    if got == want {
+        return Ok(Conformance::Exact);
+    }
+    if isomorphism((&*types, &*types), (got, want), |_| None, m)?.is_some() {
+        return Ok(Conformance::Isomorphic);
+    }
+    let n = arity(types, got).ok_or_else(|| invariant("a function of no function type"))?;
+    match leading_type(rule, n, want, types, m)? {
+        Some(prefix) if prefix == got => {
+            let adapter = stubs.adapter((def, want), (symbols, types, funcs), m)?;
+            Ok(Conformance::Adapted(adapter))
+        }
+        Some(prefix) if isomorphism((&*types, &*types), (got, prefix), |_| None, m)?.is_some() => {
+            Ok(Conformance::Isomorphic)
+        }
+        _ => Ok(Conformance::Other),
+    }
+}
+
+/// Whether a call of type `want` may call a linked function of rule `rule` that was not imported,
+/// of type `ty` in its own module's `from`: `ty` is the call's type, or under `rule` its leading
+/// parameters' ([`conform`]), up to struct identity.
+pub(super) fn may_call(
+    (from, ty): (&TypeTable, TypeId),
+    rule: CallRule,
+    want: TypeId,
+    types: &mut TypeTable,
+    m: &mut Meter,
+) -> Result<bool, Error> {
+    if isomorphism((from, &*types), (ty, want), |_| None, m)?.is_some() {
+        return Ok(true);
+    }
+    let n = arity(from, ty).ok_or_else(|| invariant("a function of no function type"))?;
+    Ok(match leading_type(rule, n, want, types, m)? {
+        Some(prefix) => isomorphism((from, &*types), (ty, prefix), |_| None, m)?.is_some(),
+        None => false,
+    })
+}
+
+/// A new internal function of type `want` whose body returns `def` called with its first
+/// arguments, as many as `def` takes ([`conform`] checked the types): `def` keeps its own type,
+/// so every other use of it (another reference, a table candidate) sees the same definition
+/// whatever the order, and inlining removes the adapter.
+fn stitched_adapter(
+    def: FuncId,
+    want: TypeId,
+    (symbols, types, funcs): (&mut Symbols, &mut TypeTable, &mut Arena<FuncId, Function>),
+    m: &mut Meter,
+) -> Result<FuncId, Error> {
+    use crate::ir::{
+        ArgIdx, Block, Body, Call, CallConv, FastMath, FnAttrs, Inst, InstId, Param, ParamAttrs,
+        TailKind, UnnamedAddr, Value,
+    };
+    let d = funcs
+        .get(def)
+        .ok_or_else(|| invariant("a linked function out of range"))?;
+    let cconv: CallConv = d.cconv;
+    let (leading, (ret, all)) = match (types.get(d.ty), types.get(want)) {
+        (
+            Some(Type::Function { params: p0, .. }),
+            Some(Type::Function {
+                ret, params: p1, ..
+            }),
+        ) => (p0.len(), (*ret, p1.len())),
+        _ => return Err(invariant("an adapter of no function type")),
+    };
+    let void = types.intern(Type::Void, m)?;
+    let mut insts = Arena::new();
+    let mut args = Vec::new();
+    m.reserve(&mut args, leading)?;
+    for i in 0..leading {
+        let i = u32::try_from(i).map_err(|_| invariant("a parameter count"))?;
+        args.push(Value::Arg(ArgIdx::new(i)));
+    }
+    let call = insts.push(
+        Inst {
+            ty: ret,
+            kind: InstKind::Call(Box::new(Call {
+                callee: Callee::Direct(def),
+                args: args.into_boxed_slice(),
+                fmf: FastMath::NONE,
+                tail: TailKind::None,
+                attrs: None,
+                range: None,
+            })),
+        },
+        m,
+    )?;
+    let value = (ret != void).then_some(Value::Inst(call));
+    insts.push(
+        Inst {
+            ty: void,
+            kind: InstKind::Ret(value),
+        },
+        m,
+    )?;
+    let mut blocks = Arena::new();
+    blocks.push(
+        Block {
+            start: InstId::new(0),
+            end: InstId::new(2),
+            name: None,
+        },
+        m,
+    )?;
+    let name = format!("__m2v.stitched_adapter.{}", funcs.len());
+    let name = symbols.intern(name.as_bytes(), m)?;
+    let mut params = Vec::new();
+    m.reserve(&mut params, all)?;
+    params.resize(all, Param::default());
+    funcs.push(
+        Function {
+            name,
+            ty: want,
+            linkage: Linkage::Internal,
+            visibility: Visibility::Default,
+            unnamed_addr: UnnamedAddr::Significant,
+            cconv,
+            attrs: FnAttrs::default(),
+            ret_attrs: ParamAttrs::default(),
+            params: params.into_boxed_slice(),
+            body: Some(Body { blocks, insts }),
+            section: None,
+            align: None,
+        },
+        m,
+    )
+}
+
 /// What one import brings in: the source module's root (a linked function, or a dynamic
 /// library's definition), and which of the module's globals and functions it reaches.
 struct Plan {
@@ -784,7 +1070,9 @@ fn plan(
     held: &mut usize,
 ) -> Result<Result<Plan, Error>, Error> {
     let name = &*f.name;
-    if l.abi.linkage_signature.is_some() {
+    // The module checks are `exports`' too, in the same order; the function's constants are
+    // checked between them.
+    if signature_blocks(l, Form::Linked) {
         return Ok(Err(not_implemented(name, "air.signature")));
     }
     if !l.abi.function_constants.is_empty() {
@@ -819,6 +1107,26 @@ fn plan(
         return Ok(Err(link_problem(name, LinkProblem::NotVisible)));
     }
     reach(l, Item::Func(func), imports, m, held)
+}
+
+/// What a module is imported as.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Form {
+    /// A linked function's module (`MTLLinkedFunctions`).
+    Linked,
+    /// A dynamic library (`MTLDynamicLibrary`).
+    Dynamic,
+}
+
+/// Whether `l`'s linkage signature keeps it from being imported as `form`: any signature, but a
+/// linked function's stitched module, whose code is the stitched function ([`CallRule::Stitched`]).
+/// A linked-constants module, and a dynamic library of either kind, are not implemented.
+fn signature_blocks(l: &LinkedCode, form: Form) -> bool {
+    match (l.abi.linkage_signature, form) {
+        (None, _) => false,
+        (Some(s), Form::Linked) => !s.is(LinkageSignatureKind::StitchingModules),
+        (Some(_), Form::Dynamic) => true,
+    }
 }
 
 /// Whether `l` defines a static initializer, which linking does not run.
@@ -1566,7 +1874,8 @@ fn exports<'a>(
             by_name.insert(name, (Item::Global(id), g.visibility));
         }
     }
-    let blocked = if code.abi.linkage_signature.is_some() {
+    // `plan`'s module checks, in the same order.
+    let blocked = if signature_blocks(code, Form::Dynamic) {
         Some("air.signature")
     } else if !code.abi.function_constants.is_empty() {
         Some("air.function_constants")

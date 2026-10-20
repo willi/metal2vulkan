@@ -59,7 +59,6 @@ use crate::ir::{Constant, FastMath, FuncId, Function, Idx, Inst, InstId, InstKin
 use super::fold::Folder;
 use super::function_table::{FIRST_ENTRY_WORD, SIZE_WORD};
 use super::link::{self, Candidate, Stub, Stubs};
-use super::renumber::isomorphism;
 use super::rewrite::{filled, invariant, scoped};
 use super::sccp::{self, Fact, FcState};
 
@@ -121,9 +120,11 @@ pub(super) struct FunctionWords {
 impl FunctionWords {
     /// The words of `candidates` and of `addressed`, the defined functions and unresolved stubs
     /// whose address a reached body takes, those no candidate is numbered from `first_own` in
-    /// function order.
+    /// function order. An adapter of a linked definition ([`Stubs::definition`]) has its
+    /// definition's word: one function, one address, whatever type a reference takes it at.
     pub(super) fn new(
         parts: &ModuleParts,
+        stubs: &Stubs,
         candidates: &[Candidate],
         addressed: &BTreeSet<FuncId>,
         first_own: u32,
@@ -148,14 +149,26 @@ impl FunctionWords {
                 .funcs
                 .get(f)
                 .ok_or_else(|| invariant("an addressed function out of range"))?;
+            let def = stubs.definition(f);
+            let word = match words.of.get(&def) {
+                Some(&w) if def != f => w,
+                _ => {
+                    let w = next;
+                    next = next
+                        .checked_add(1)
+                        .ok_or_else(|| invariant("function words past the word space"))?;
+                    if def != f {
+                        m.charge(entry)?;
+                        words.of.insert(def, w);
+                    }
+                    w
+                }
+            };
             m.charge(entry * 2)?;
-            words.of.insert(f, next);
+            words.of.insert(f, word);
             if func.body.is_some() {
-                words.own.entry(func.ty).or_default().push((next, f));
+                words.own.entry(func.ty).or_default().push((word, f));
             }
-            next = next
-                .checked_add(1)
-                .ok_or_else(|| invariant("function words past the word space"))?;
         }
         Ok(words)
     }
@@ -1735,7 +1748,9 @@ fn analyze(
 /// function's (a table's entry, a pointer from memory) may hold each function a table can hold
 /// (the pipeline's [`Candidate`]s) and each function of the call's type whose address is taken; one
 /// made only of constant addresses holds just those. A function of another type reaches the
-/// default: calling it through this type is undefined in Metal.
+/// default: calling it through this type is undefined in Metal. A candidate whose rule lets a
+/// call of another type reach it (a stitched function, at the call's leading parameters) is called
+/// through its adapter ([`link::conform`]).
 fn site(
     (parts, stubs): (&mut ModuleParts, &mut Stubs),
     cx: &Cx<'_>,
@@ -1753,26 +1768,35 @@ fn site(
         }
         let refusal = match &c.def {
             Ok(g) => {
-                let gty = parts
-                    .funcs
-                    .get(*g)
-                    .map(|f| f.ty)
-                    .ok_or_else(|| invariant("a candidate out of range"))?;
-                if gty == fn_ty {
-                    arms.push((c.word, *g));
-                    continue;
-                }
-                let types = (&parts.types, &parts.types);
-                if isomorphism(types, (gty, fn_ty), |_| None, m)?.is_none() {
+                let dest = (&mut parts.symbols, &mut parts.types, &mut parts.funcs);
+                match link::conform((*g, c.rule), fn_ty, dest, stubs, m)? {
+                    link::Conformance::Exact => {
+                        arms.push((c.word, *g));
+                        continue;
+                    }
+                    // A stitched function called at a type of more parameters: its adapter, unless
+                    // an explicit call stack calls the function, which the adapter's direct call
+                    // would bypass.
+                    link::Conformance::Adapted(_)
+                        if cx.groups.contains_key(g) || cx.enters.contains_key(g) =>
+                    {
+                        Unsupported::not_implemented(Feature::Recursion)
+                            .naming(DiagName::new(String::from_utf8_lossy(&c.name)))
+                            .into()
+                    }
+                    link::Conformance::Adapted(adapter) => {
+                        arms.push((c.word, adapter));
+                        continue;
+                    }
                     // Another type: a table entry holding it reaches the default (undefined in
                     // Metal).
-                    continue;
+                    link::Conformance::Other => continue,
+                    // The call's type up to struct identity: it would need its values converted.
+                    link::Conformance::Isomorphic => link::not_implemented(&c.name, "type"),
                 }
-                // The call's type up to struct identity: it would need its values converted.
-                link::not_implemented(&c.name, "type")
             }
-            // Not imported: a surviving call that may call it (its type is the call's, or
-            // unknown because its module did not decode) is refused with the reason.
+            // Not imported: a surviving call that may call it (its type is the call's, or its
+            // rule's, or unknown because its module did not decode) is refused with the reason.
             Err(u) => {
                 if let Some((l, ty)) = u.ty {
                     let from = cx
@@ -1780,8 +1804,8 @@ fn site(
                         .get(l)
                         .and_then(|l| l.code.as_ref().ok())
                         .ok_or_else(|| invariant("a candidate's module out of range"))?;
-                    let types = (&from.module.parts().types, &parts.types);
-                    if isomorphism(types, (ty, fn_ty), |_| None, m)?.is_none() {
+                    let from = (&from.module.parts().types, ty);
+                    if !link::may_call(from, c.rule, fn_ty, &mut parts.types, m)? {
                         continue;
                     }
                 }

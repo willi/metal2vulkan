@@ -3194,7 +3194,11 @@ fn a_linkage_signature_describes_a_closed_module() {
         let module = m.finish().unwrap();
         let fcs = c.map(|c| vec![fc_decl(0, c, i32t)]).unwrap_or_default();
         let mut abi = abi(vec![kernel(k, Vec::new())], fcs);
-        abi.linkage_signature = Some(LinkageSignature { kind, operands: 2 });
+        abi.linkage_signature = Some(LinkageSignature {
+            kind,
+            operands: 2,
+            inputs: None,
+        });
         (module, abi)
     };
     for kind in [

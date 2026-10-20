@@ -151,14 +151,27 @@ fn lookup(f: &mut FunctionBuilder<'_>, decl: FuncId, table: Value, index: Value)
 /// The kernel `k(device i32* out, table t, i32 tid)`: `*out = t[tid](tid)`, the call behind
 /// `br false` when `dead`.
 fn table_kernel(dead: bool) -> (Module, AirAbi) {
+    table_kernel_of(dead, 1)
+}
+
+/// [`table_kernel`] through a call of type `i32 (i32 x arity)`, passed `tid` and then the
+/// constants `100`, `101`, ...
+fn table_kernel_of(dead: bool, arity: usize) -> (Module, AirAbi) {
     let mut m = ModuleBuilder::new();
     let void = m.void();
     let i1 = m.int(1);
     let i32t = m.int(32);
     let dev = m.ptr(AddrSpace::Device);
-    let fty = m.fn_ty(i32t, &[i32t]);
+    let fty = m.fn_ty(i32t, &vec![i32t; arity]);
     let decl = lookup_decl(&mut m);
     let no = m.const_int(i1, 0);
+    let args: Vec<Value> = std::iter::once(arg(2))
+        .chain(
+            (100..)
+                .map(|v| m.const_int(i32t, v))
+                .take(arity.saturating_sub(1)),
+        )
+        .collect();
     let kty = m.fn_ty(void, &[dev, dev, i32t]);
     let mut k = m.define("k", kty);
     if dead {
@@ -170,7 +183,7 @@ fn table_kernel(dead: bool) -> (Module, AirAbi) {
             callee: fp,
             fn_ty: fty,
         };
-        let r = call(&mut k, i32t, callee, &[arg(2)]);
+        let r = call(&mut k, i32t, callee, &args);
         store(&mut k, r, arg(0));
         k.br(done);
         k.switch_to(done);
@@ -180,7 +193,7 @@ fn table_kernel(dead: bool) -> (Module, AirAbi) {
             callee: fp,
             fn_ty: fty,
         };
-        let r = call(&mut k, i32t, callee, &[arg(2)]);
+        let r = call(&mut k, i32t, callee, &args);
         store(&mut k, r, arg(0));
     }
     k.ret(None);
@@ -281,6 +294,7 @@ fn a_devirtualized_body_is_charged_exactly_its_footprint() {
         word,
         name: name.as_bytes().into(),
         def: Ok(f),
+        rule: link::CallRule::Exact,
     });
     let tables = [devirt::TableParam {
         arg: 1,
@@ -361,6 +375,160 @@ fn a_table_call_is_a_switch_over_the_candidates_of_its_type() {
             ..
         }))
     ));
+}
+
+/// A stitched linked module of one visible function `name: i32 (i32 x)`, `x <op> c`, a function a
+/// table can hold at `word`, whose graph's one input node is argument 0.
+fn stitched_candidate(name: &str, word: u32, op: BinOp, c: u64) -> LinkedModule {
+    use crate::abi::{LinkageSignature, LinkageSignatureKind, StitchingInputs};
+    let mut m = ModuleBuilder::new();
+    let i32t = m.int(32);
+    let ity = m.fn_ty(i32t, &[i32t]);
+    let c = m.const_int(i32t, c);
+    let mut f = m.define(name, ity);
+    let v = f.bin(op, arg(0), c);
+    f.ret(Some(v));
+    let func = f.finish();
+    let module = m.finish().unwrap();
+    let mut abi = abi();
+    abi.visible_functions = vec![VisibleFunction {
+        func,
+        params: Vec::new(),
+        outputs: Vec::new(),
+        stitching: None,
+        name: DiagName::new(name),
+    }];
+    abi.linkage_signature = Some(LinkageSignature {
+        kind: LinkageSignatureKind::StitchingModules,
+        operands: 2,
+        inputs: Some(StitchingInputs {
+            count: 1,
+            end: 1,
+            ascending: true,
+        }),
+    });
+    LinkedModule {
+        functions: vec![LinkedName {
+            name: name.as_bytes().into(),
+            constants: Ok(BTreeMap::new()),
+            handle: Some(word),
+        }],
+        code: Ok(LinkedCode { module, abi }),
+    }
+}
+
+/// A stitched function in a table, called at the wider visible-function type its graph's unread
+/// inputs leave out (B24's custom_fn shape), is a case through its adapter, passed the call's
+/// leading argument; one of another module is no case, so the call has no candidate. Guards a
+/// silent wrong result: the stitched call reaching the default.
+#[test]
+fn a_stitched_candidate_of_fewer_parameters_is_a_case_of_a_wider_table_call() {
+    // `*out = t[tid](tid, 100)`.
+    let (module, abi) = table_kernel_of(false, 2);
+    let linked = [
+        stitched_candidate("inc", 2, BinOp::Add, 1),
+        stitched_candidate("dbl", 3, BinOp::Mul, 2),
+    ];
+    let e = specialize_linked(module, &abi, &request(), &linked, &mut meter())
+        .unwrap_or_else(|e| panic!("{e}"));
+    let text = print(&e.module);
+    let switch = text
+        .lines()
+        .find(|l| l.contains("switch "))
+        .unwrap_or_else(|| panic!("no switch:\n{text}"));
+    assert!(
+        switch.contains(" 2: bb") && switch.contains(" 3: bb"),
+        "{switch}"
+    );
+    assert!(!text.contains("call "), "the adapters are inlined:\n{text}");
+    assert!(
+        text.contains("add i32") && text.contains("mul i32"),
+        "{text}"
+    );
+    // The trailing argument is passed nowhere (in its place, the cases would fold to constants).
+    assert!(!text.contains("100"), "{text}");
+    // Unstitched, no candidate is of the call's type: the call has none to answer it.
+    let (module, abi) = table_kernel_of(false, 2);
+    assert_eq!(
+        specialize_linked(module, &abi, &request(), &[candidates()], &mut meter()).map(|_| ()),
+        Err(Error::NeedsInput(MissingInput::VisibleFunctionTable {
+            buffer: Some(1)
+        }))
+    );
+}
+
+/// A stitched candidate that cannot be imported (another data layout) is still a candidate of a
+/// wider call by its rule, so a surviving call that may call it is refused with its reason, beside
+/// one that imports. Guards a silent wrong result: the call reaching the default for its word.
+#[test]
+fn an_unimportable_stitched_candidate_is_refused_at_a_wider_call() {
+    let mut broken = stitched_candidate("dbl", 3, BinOp::Mul, 2);
+    if let Ok(code) = &mut broken.code {
+        let mut parts = code.module.clone().into_parts();
+        parts.data_layout.stack_align_bits = Some(1024);
+        code.module = Module::new(parts, &mut meter()).unwrap();
+    }
+    let (module, abi) = table_kernel_of(false, 2);
+    let linked = [stitched_candidate("inc", 2, BinOp::Add, 1), broken];
+    assert_eq!(
+        specialize_linked(module, &abi, &request(), &linked, &mut meter()).map(|_| ()),
+        Err(Error::InvalidRequest(RequestError::LinkedFunction {
+            name: DiagName::new("dbl"),
+            problem: crate::error::LinkProblem::DataLayout,
+        }))
+    );
+}
+
+/// One stitched definition both a reference stub and a table candidate reach, each at its own
+/// type, the wider through the adapter: both calls are answered, whichever is the wider.
+#[test]
+fn a_stitched_function_answers_a_reference_and_a_table_call_of_two_widths() {
+    for (table_arity, stub_arity) in [(2, 1), (1, 2)] {
+        // `*out = t[tid](tid, ..) + inc(tid, ..)`.
+        let mut m = ModuleBuilder::new();
+        let void = m.void();
+        let i32t = m.int(32);
+        let dev = m.ptr(AddrSpace::Device);
+        let table_ty = m.fn_ty(i32t, &vec![i32t; table_arity]);
+        let stub_ty = m.fn_ty(i32t, &vec![i32t; stub_arity]);
+        let decl = lookup_decl(&mut m);
+        let stub = m.declare("inc.MTL_VISIBLE_FN_REF", stub_ty);
+        let hundred = m.const_int(i32t, 100);
+        let kty = m.fn_ty(void, &[dev, dev, i32t]);
+        let mut k = m.define("k", kty);
+        let args = |n: usize| [arg(2), hundred][..n].to_vec();
+        let fp = lookup(&mut k, decl, arg(1), arg(2));
+        let callee = Callee::Indirect {
+            callee: fp,
+            fn_ty: table_ty,
+        };
+        let a = call(&mut k, i32t, callee, &args(table_arity));
+        let b = call(&mut k, i32t, Callee::Direct(stub), &args(stub_arity));
+        let v = k.bin(BinOp::Xor, a, b);
+        store(&mut k, v, arg(0));
+        k.ret(None);
+        let kf = k.finish();
+        let module = m.finish().unwrap();
+        let mut abi = abi();
+        abi.entries = vec![kernel(kf, vec![out(0), table(1)])];
+        abi.visible_function_refs = vec![crate::abi::VisibleFunctionRef {
+            target: crate::abi::VisibleTarget::Function(stub),
+            symbol: crate::abi::VisibleSymbol(b"inc".as_slice().into()),
+        }];
+        let linked = [stitched_candidate("inc", 2, BinOp::Add, 1)];
+        let e = specialize_linked(module, &abi, &request(), &linked, &mut meter())
+            .unwrap_or_else(|e| panic!("{table_arity}/{stub_arity}: {e}"));
+        let text = print(&e.module);
+        assert!(
+            !text.contains("call "),
+            "{table_arity}/{stub_arity}:\n{text}"
+        );
+        assert!(
+            text.contains(" 2: bb"),
+            "{table_arity}/{stub_arity}:\n{text}"
+        );
+        assert!(!text.contains("100"), "{table_arity}/{stub_arity}:\n{text}");
+    }
 }
 
 /// A table call no candidate of its type answers needs the pipeline's linked functions, unless
@@ -1292,7 +1460,9 @@ fn a_pointer_function_constants_choose_is_decided_before_its_switch() {
         };
         let (a, b) = (funcs(b"a"), funcs(b"b"));
         let addressed = BTreeSet::from([a, b]);
-        let words = devirt::FunctionWords::new(&parts, &[], &addressed, 2, &mut m).unwrap();
+        let words =
+            devirt::FunctionWords::new(&parts, &link::Stubs::default(), &[], &addressed, 2, &mut m)
+                .unwrap();
         let params = match parts.funcs.get(k).and_then(|f| parts.types.get(f.ty)) {
             Some(Type::Function { params, .. }) => params.to_vec(),
             _ => panic!("k is a function"),
