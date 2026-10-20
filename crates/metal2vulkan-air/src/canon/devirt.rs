@@ -1735,7 +1735,8 @@ fn analyze(
 /// function's (a table's entry, a pointer from memory) may hold each function a table can hold
 /// (the pipeline's [`Candidate`]s) and each function of the call's type whose address is taken; one
 /// made only of constant addresses holds just those. A function of another type reaches the
-/// default: calling it through this type is undefined in Metal.
+/// default: calling it through this type is undefined in Metal. A stitched candidate of the
+/// call's leading parameters is called through its adapter (`link::stitched_adapter`).
 fn site(
     (parts, stubs): (&mut ModuleParts, &mut Stubs),
     cx: &Cx<'_>,
@@ -1761,6 +1762,20 @@ fn site(
                 if gty == fn_ty {
                     arms.push((c.word, *g));
                     continue;
+                }
+                // A stitched function called at a type of more parameters: its adapter.
+                if c.stitched {
+                    let adapted = link::stitched_adapter(
+                        (*g, gty),
+                        fn_ty,
+                        &mut parts.types,
+                        &mut parts.funcs,
+                        m,
+                    )?;
+                    if let Some(adapter) = adapted {
+                        arms.push((c.word, adapter));
+                        continue;
+                    }
                 }
                 let types = (&parts.types, &parts.types);
                 if isomorphism(types, (gty, fn_ty), |_| None, m)?.is_none() {

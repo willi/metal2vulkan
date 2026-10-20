@@ -1289,9 +1289,11 @@ pub enum LinkageSignatureKind {
 /// `!air.signature`. Only its kind and operand count are decoded. It describes how a closed
 /// module was produced (the constants a linked-constants module was specialized with, the graph
 /// a stitched module was built from); the module's own code is what runs. A linked-constants module
-/// that still declares function constants is refused (`Feature::Linking`), as is a linked function
-/// module with a signature. An `air.rename_qualified_function_signature` (a function renamed to its
-/// qualified name after it was produced) is read as the signature it wraps.
+/// that still declares function constants is refused (`Feature::Linking`), as is a linked function's
+/// linked-constants module. A linked function's stitched module links, through an adapter when the
+/// reference has more parameters than the stitched function (`canon::link`). An
+/// `air.rename_qualified_function_signature` (a function renamed to its qualified name after it
+/// was produced) is read as the signature it wraps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LinkageSignature {
     /// Which signature the node's leading string names.

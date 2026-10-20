@@ -89,13 +89,36 @@ fn arg(i: u32) -> Value {
 /// `kernel k(device i32* out, i32 tid)`: `*out = f(tid)` through the stub of `f`, an `i32
 /// (i32)` visible function it references. With `dead`, the call sits behind `br false`.
 fn caller(dead: bool) -> (Module, AirAbi) {
+    caller_of(dead, &[1])
+}
+
+/// [`caller`] through one reference to `f` per entry of `arities`, each `i32` taking that many `i32`
+/// parameters: `*out = f(.. f(tid, ..) ..)`, each call passed the last one's result.
+fn caller_of(dead: bool, arities: &[usize]) -> (Module, AirAbi) {
     let mut m = ModuleBuilder::new();
     let void = m.void();
     let i1 = m.int(1);
     let i32t = m.int(32);
     let dev = m.ptr(AddrSpace::Device);
-    let fty = m.fn_ty(i32t, &[i32t]);
-    let stub = m.declare("f.MTL_VISIBLE_FN_REF", fty);
+    let stubs: Vec<(FuncId, usize)> = arities
+        .iter()
+        .enumerate()
+        .map(|(i, &n)| {
+            let fty = m.fn_ty(i32t, &vec![i32t; n]);
+            let name = match i {
+                0 => "f.MTL_VISIBLE_FN_REF".to_string(),
+                i => format!("f.MTL_VISIBLE_FN_REF.{i}"),
+            };
+            (m.declare(&name, fty), n)
+        })
+        .collect();
+    let chain = |k: &mut FunctionBuilder<'_>| {
+        let mut v = arg(1);
+        for &(stub, n) in &stubs {
+            v = call(k, i32t, stub, &vec![v; n]);
+        }
+        v
+    };
     let kty = m.fn_ty(void, &[dev, i32t]);
     let no = m.const_int(i1, 0);
     let mut k = m.define("k", kty);
@@ -104,12 +127,12 @@ fn caller(dead: bool) -> (Module, AirAbi) {
         let done = k.block();
         k.cond_br(no, then, done);
         k.switch_to(then);
-        let v = call(&mut k, i32t, stub, &[arg(1)]);
+        let v = chain(&mut k);
         store(&mut k, v, arg(0));
         k.br(done);
         k.switch_to(done);
     } else {
-        let v = call(&mut k, i32t, stub, &[arg(1)]);
+        let v = chain(&mut k);
         store(&mut k, v, arg(0));
     }
     k.ret(None);
@@ -143,7 +166,7 @@ fn caller(dead: bool) -> (Module, AirAbi) {
         name: DiagName::new("k"),
         user_annotation: None,
     }];
-    abi.visible_function_refs = vec![reference(stub, "f")];
+    abi.visible_function_refs = stubs.iter().map(|&(s, _)| reference(s, "f")).collect();
     (module, abi)
 }
 
@@ -434,6 +457,58 @@ fn linked_module_features_not_implemented_are_refused_at_the_call() {
         assert_eq!(u.symbol, Some(DiagName::new("f")), "{u}");
         assert_eq!(u.location, Some(at.clone()), "{u}");
     }
+}
+
+/// A stitched function takes one parameter per input node its graph reads, while the reference
+/// names the whole visible-function type: RenderBox's `custom_effect_fragment` passes 7 arguments
+/// to a stitched `custom_fn` of 5 (B24). The reference resolves when its parameters start with the
+/// definition's, the rest unread. Another module of that type, or a stitched definition whose
+/// parameters are not the reference's leading ones, is still another signature.
+#[test]
+fn a_stitched_function_of_fewer_parameters_resolves_the_reference() {
+    use crate::abi::{LinkageSignature, LinkageSignatureKind};
+    let stitched = |mut l: LinkedModule| {
+        code(&mut l).abi.linkage_signature = Some(LinkageSignature {
+            kind: LinkageSignatureKind::StitchingModules,
+            operands: 2,
+        });
+        l
+    };
+    let run = |l: LinkedModule| {
+        // `*out = f(tid, tid)` through a reference `i32 (i32, i32)`.
+        let (module, abi) = caller_of(false, &[2]);
+        specialize_linked(module, &abi, &request(), &[l], &mut meter())
+    };
+    let e = run(stitched(callee("f", &[]))).unwrap_or_else(|e| panic!("{e}"));
+    let t = text(&e);
+    assert!(!t.contains("call "), "{t}");
+    assert!(t.contains("mul i32"), "{t}");
+    // The definition keeps its own type, so references of both types resolve, in either order:
+    // widening the import in place would refuse whichever reference came second.
+    for arities in [[2, 1], [1, 2]] {
+        let (module, abi) = caller_of(false, &arities);
+        let e = specialize_linked(module, &abi, &request(), &[stitched(callee("f", &[]))], &mut meter())
+            .unwrap_or_else(|e| panic!("{arities:?}: {e}"));
+        let t = text(&e);
+        assert!(!t.contains("call "), "{arities:?}: {t}");
+        assert_eq!(t.matches("mul i32").count(), 2, "{arities:?}: {t}");
+    }
+    let signature = Error::InvalidRequest(RequestError::LinkedFunction {
+        name: DiagName::new("f"),
+        problem: LinkProblem::Signature,
+    });
+    assert_eq!(run(callee("f", &[])).unwrap_err(), signature);
+    // A stitched `i64 (i64)`: not the reference's leading parameter.
+    let mut m = ModuleBuilder::new();
+    let i64t = m.int(64);
+    let fty = m.fn_ty(i64t, &[i64t]);
+    let mut f = m.define("f", fty);
+    f.ret(Some(arg(0)));
+    let func = f.finish();
+    let mut other = callee("f", &[]);
+    code(&mut other).module = m.finish().unwrap();
+    code(&mut other).abi.visible_functions = vec![visible(func, "f")];
+    assert_eq!(run(stitched(other)).unwrap_err(), signature);
 }
 
 /// A call to a declaration no reference names is still a function to link from a dynamic

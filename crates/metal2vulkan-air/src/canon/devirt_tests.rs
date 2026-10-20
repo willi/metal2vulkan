@@ -151,12 +151,17 @@ fn lookup(f: &mut FunctionBuilder<'_>, decl: FuncId, table: Value, index: Value)
 /// The kernel `k(device i32* out, table t, i32 tid)`: `*out = t[tid](tid)`, the call behind
 /// `br false` when `dead`.
 fn table_kernel(dead: bool) -> (Module, AirAbi) {
+    table_kernel_of(dead, 1)
+}
+
+/// [`table_kernel`] through a call of type `i32 (i32 x arity)`, passed `tid` each time.
+fn table_kernel_of(dead: bool, arity: usize) -> (Module, AirAbi) {
     let mut m = ModuleBuilder::new();
     let void = m.void();
     let i1 = m.int(1);
     let i32t = m.int(32);
     let dev = m.ptr(AddrSpace::Device);
-    let fty = m.fn_ty(i32t, &[i32t]);
+    let fty = m.fn_ty(i32t, &vec![i32t; arity]);
     let decl = lookup_decl(&mut m);
     let no = m.const_int(i1, 0);
     let kty = m.fn_ty(void, &[dev, dev, i32t]);
@@ -170,7 +175,7 @@ fn table_kernel(dead: bool) -> (Module, AirAbi) {
             callee: fp,
             fn_ty: fty,
         };
-        let r = call(&mut k, i32t, callee, &[arg(2)]);
+        let r = call(&mut k, i32t, callee, &vec![arg(2); arity]);
         store(&mut k, r, arg(0));
         k.br(done);
         k.switch_to(done);
@@ -180,7 +185,7 @@ fn table_kernel(dead: bool) -> (Module, AirAbi) {
             callee: fp,
             fn_ty: fty,
         };
-        let r = call(&mut k, i32t, callee, &[arg(2)]);
+        let r = call(&mut k, i32t, callee, &vec![arg(2); arity]);
         store(&mut k, r, arg(0));
     }
     k.ret(None);
@@ -281,6 +286,7 @@ fn a_devirtualized_body_is_charged_exactly_its_footprint() {
         word,
         name: name.as_bytes().into(),
         def: Ok(f),
+        stitched: false,
     });
     let tables = [devirt::TableParam {
         arg: 1,
@@ -361,6 +367,38 @@ fn a_table_call_is_a_switch_over_the_candidates_of_its_type() {
             ..
         }))
     ));
+}
+
+/// A stitched function in a table, called at the wider visible-function type its graph's unread
+/// inputs leave out (B24's custom_fn shape), is a case through its adapter; a non-stitched one of
+/// that type is no case. Guards a silent wrong result: the call reaching the default.
+#[test]
+fn a_stitched_candidate_of_fewer_parameters_is_a_case_of_a_wider_table_call() {
+    use crate::abi::{LinkageSignature, LinkageSignatureKind};
+    let run = |stitched: bool| {
+        let mut linked = candidates();
+        if stitched {
+            if let Ok(code) = &mut linked.code {
+                code.abi.linkage_signature = Some(LinkageSignature {
+                    kind: LinkageSignatureKind::StitchingModules,
+                    operands: 2,
+                });
+            }
+        }
+        let (module, abi) = table_kernel_of(false, 2);
+        specialize_linked(module, &abi, &request(), &[linked], &mut meter())
+    };
+    let e = run(true).unwrap_or_else(|e| panic!("{e}"));
+    let text = print(&e.module);
+    let switch = text
+        .lines()
+        .find(|l| l.contains("switch "))
+        .unwrap_or_else(|| panic!("no switch:\n{text}"));
+    assert!(switch.contains(" 2: bb") && switch.contains(" 3: bb"), "{switch}");
+    assert!(!text.contains("call "), "the adapters are inlined:\n{text}");
+    assert!(text.contains("add i32") && text.contains("mul i32"), "{text}");
+    let text = print(&run(false).unwrap_or_else(|e| panic!("{e}")).module);
+    assert!(!text.contains("add i32") && !text.contains("mul i32"), "{text}");
 }
 
 /// A table call no candidate of its type answers needs the pipeline's linked functions, unless

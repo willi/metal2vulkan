@@ -11,7 +11,10 @@
 //! `Recursion`. Types map as LLVM's IR linker maps them: the definition's type pairs with the
 //! stub's structurally, identified structs by body whatever their names (the Metal compiler numbers
 //! a struct `%struct.T.153` in one module and `%struct.T` in another), and any other identified
-//! struct is the module's first struct of the same body.
+//! struct is the module's first struct of the same body. A stitched module's function (one with
+//! `air.stitching_modules_signature`) takes one parameter per input node its graph reads, and
+//! the reference may name more: the stub then calls an internal adapter of the reference's type
+//! that passes the definition its leading arguments; the definition keeps its own type.
 //!
 //! Nothing here refuses: a call to a stub may be dead once constants are bound, and Metal links
 //! what the specialized function calls. Each stub that is not resolved keeps a [`Stub`] state,
@@ -19,7 +22,8 @@
 //! no linked function has its name, and otherwise the reason the named function cannot resolve
 //! it (another function type, a function that is not visible, two linked functions of that name,
 //! another data layout, or a module feature linking does not implement yet: function constants,
-//! a static initializer, a linkage signature, or a global it only declares and does not import).
+//! a static initializer, a linked-constants signature, or a global it only declares and does not
+//! import).
 //!
 //! When the entry takes a visible-function table, every function the pipeline can place in one (a
 //! [`LinkedName`] with a table word) is imported the same way, after the stubs, as a [`Candidate`]
@@ -93,6 +97,8 @@ pub(super) struct Candidate {
     pub word: u32,
     pub name: Box<[u8]>,
     pub def: Result<FuncId, Unimported>,
+    /// Its module is stitched: a call of a wider type may call it ([`stitched_adapter`]).
+    pub stitched: bool,
 }
 
 /// Why a [`Candidate`] was not imported, and which calls it could answer.
@@ -525,6 +531,7 @@ fn link_in(
                         word,
                         name: f.name.clone(),
                         def,
+                        stitched: stitched_code(l),
                     });
                 }
             }
@@ -584,9 +591,21 @@ fn link_in(
                                 .ok_or_else(|| invariant("a linked function out of range"))
                         };
                         let (want, got) = (ty(stub)?, ty(def)?);
+                        let adapter = match (want == got, stitched_code(l)) {
+                            (false, true) => stitched_adapter(
+                                (def, got),
+                                want,
+                                &mut tables.types,
+                                &mut funcs,
+                                m,
+                            )?,
+                            _ => None,
+                        };
                         let types = (&tables.types, &tables.types);
                         if want == got {
                             Stub::Resolved(def)
+                        } else if let Some(adapter) = adapter {
+                            Stub::Resolved(adapter)
                         } else if isomorphism(types, (got, want), |_| None, m)?.is_some() {
                             // Another reference to a definition already imported for a reference
                             // of a different but isomorphic type (two identified structs of one
@@ -764,6 +783,95 @@ fn import_linked(
     }
 }
 
+/// Whether `l` is a stitched module (`air.stitching_modules_signature`).
+fn stitched(l: &LinkedCode) -> bool {
+    l.abi
+        .linkage_signature
+        .is_some_and(|s| s.kind == crate::abi::LinkageSignatureKind::StitchingModules)
+}
+
+/// [`stitched`] for a linked module whose code decoded.
+fn stitched_code(l: &LinkedModule) -> bool {
+    l.code.as_ref().is_ok_and(stitched)
+}
+
+/// For a reference of type `want` to the stitched definition `def` (of `got`): an internal
+/// function of `want` that returns `def` called with its leading arguments, when `want` returns
+/// what `def` returns and takes `def`'s parameters followed by more. A stitched function takes one
+/// parameter per input node its graph reads, the reference the whole visible-function type; the
+/// arguments past the definition's are unread. `def` keeps its own type, so every other use of it
+/// (another reference, a table candidate) sees the same definition whatever the order. `None`
+/// for any other pair, left to the type check.
+pub(super) fn stitched_adapter(
+    (def, got): (FuncId, TypeId),
+    want: TypeId,
+    types: &mut TypeTable,
+    funcs: &mut Arena<FuncId, Function>,
+    m: &mut Meter,
+) -> Result<Option<FuncId>, Error> {
+    use crate::ir::{ArgIdx, Block, Body, Call, FastMath, Inst, InstId, Param, TailKind, Type, Value};
+    let (
+        Some(Type::Function { ret: r0, params: p0, vararg: false }),
+        Some(Type::Function { ret: r1, params: p1, vararg: false }),
+    ) = (types.get(got), types.get(want))
+    else {
+        return Ok(None);
+    };
+    if r0 != r1 || p1.len() <= p0.len() || !p1.starts_with(p0) {
+        return Ok(None);
+    }
+    let (ret, leading, all) = (*r0, p0.len(), p1.len());
+    let void = types.intern(Type::Void, m)?;
+    let mut f = funcs
+        .get(def)
+        .cloned()
+        .ok_or_else(|| invariant("a linked function out of range"))?;
+    m.charge(std::mem::size_of::<Param>() * all + 2 * std::mem::size_of::<Inst>())?;
+    let mut insts = Arena::new();
+    let args = (0..leading)
+        .map(|i| u32::try_from(i).map(|i| Value::Arg(ArgIdx::new(i))))
+        .collect::<Result<Box<[Value]>, _>>()
+        .map_err(|_| invariant("a parameter count"))?;
+    let call = insts.push(
+        Inst {
+            ty: ret,
+            kind: InstKind::Call(Box::new(Call {
+                callee: Callee::Direct(def),
+                args,
+                fmf: FastMath::NONE,
+                tail: TailKind::None,
+                attrs: None,
+                range: None,
+            })),
+        },
+        m,
+    )?;
+    let value = (ret != void).then_some(Value::Inst(call));
+    insts.push(
+        Inst {
+            ty: void,
+            kind: InstKind::Ret(value),
+        },
+        m,
+    )?;
+    let mut blocks = Arena::new();
+    blocks.push(
+        Block {
+            start: InstId::new(0),
+            end: InstId::new(2),
+            name: None,
+        },
+        m,
+    )?;
+    f.ty = want;
+    let mut params = f.params.to_vec();
+    params.resize(all, Param::default());
+    f.params = params.into();
+    f.linkage = Linkage::Internal;
+    f.body = Some(Body { blocks, insts });
+    Ok(Some(funcs.push(f, m)?))
+}
+
 /// What one import brings in: the source module's root (a linked function, or a dynamic
 /// library's definition), and which of the module's globals and functions it reaches.
 struct Plan {
@@ -784,7 +892,7 @@ fn plan(
     held: &mut usize,
 ) -> Result<Result<Plan, Error>, Error> {
     let name = &*f.name;
-    if l.abi.linkage_signature.is_some() {
+    if l.abi.linkage_signature.is_some() && !stitched(l) {
         return Ok(Err(not_implemented(name, "air.signature")));
     }
     if !l.abi.function_constants.is_empty() {
