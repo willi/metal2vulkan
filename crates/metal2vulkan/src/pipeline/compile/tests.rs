@@ -2120,6 +2120,136 @@ entry:
 !9 = !{i32 0, !"air.position", !"air.center", !"air.no_perspective", !"air.arg_type_name", !"float4", !"air.arg_name", !"position"}
 "#;
 
+/// A fragment function that reads `[[front_facing]]` as `i8` and truncates it, as AIR from the
+/// iOS Simulator's compiler service passes a `bool` argument (B19: RenderBox's path fills), and one
+/// that reads it as `i1`, as the toolchain's own AIR does; each picks its color by the face.
+const FRONT_FACING_FORMS: &str = r#"target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32"
+target triple = "air64_v28-apple-macosx26.0.0"
+
+define <4 x float> @face_vertex(i32 %vid) {
+entry:
+  %f = uitofp i32 %vid to float
+  %v = insertelement <4 x float> <float poison, float 0.0, float 0.0, float 1.0>, float %f, i64 0
+  ret <4 x float> %v
+}
+
+define <4 x float> @face_i8(i8 %face) {
+entry:
+  %b = trunc i8 %face to i1
+  %v = select i1 %b, <4 x float> <float 1.0, float 0.0, float 0.0, float 1.0>, <4 x float> <float 0.0, float 1.0, float 0.0, float 1.0>
+  ret <4 x float> %v
+}
+
+define <4 x float> @face_i1(i1 %face) {
+entry:
+  %v = select i1 %face, <4 x float> <float 1.0, float 0.0, float 0.0, float 1.0>, <4 x float> <float 0.0, float 1.0, float 0.0, float 1.0>
+  ret <4 x float> %v
+}
+
+!air.vertex = !{!0}
+!air.fragment = !{!5, !10}
+!0 = !{ptr @face_vertex, !1, !3}
+!1 = !{!2}
+!2 = !{!"air.position", !"air.arg_type_name", !"float4"}
+!3 = !{!4}
+!4 = !{i32 0, !"air.vertex_id", !"air.arg_type_name", !"uint", !"air.arg_name", !"vid"}
+!5 = !{ptr @face_i8, !6, !8}
+!6 = !{!7}
+!7 = !{!"air.render_target", i32 0, i32 0, !"air.arg_type_name", !"float4"}
+!8 = !{!9}
+!9 = !{i32 0, !"air.front_facing", !"air.arg_type_name", !"bool", !"air.arg_name", !"front_facing"}
+!10 = !{ptr @face_i1, !6, !8}
+"#;
+
+/// The instructions of a SPIR-V module: each one's words, opcode first.
+fn instructions(words: &[u32]) -> Vec<&[u32]> {
+    let mut out = Vec::new();
+    let mut i = 5;
+    while let Some(&w) = words.get(i) {
+        let len = (w >> 16) as usize;
+        if len == 0 || i + len > words.len() {
+            break;
+        }
+        out.push(&words[i..i + len]);
+        i += len;
+    }
+    out
+}
+
+/// Whether `words` turn the `FrontFacing` builtin into an integer 1 for a front face and 0 for a
+/// back face: an `OpSelect` on a load of the builtin's variable whose true operand is the
+/// constant 1 and whose false operand is the constant 0.
+fn selects_one_for_a_front_face(words: &[u32]) -> bool {
+    const DECORATE: u32 = 71;
+    const LOAD: u32 = 61;
+    const SELECT: u32 = 169;
+    const CONSTANT: u32 = 43;
+    let ins = instructions(words);
+    let op = |i: &[u32]| i[0] & 0xFFFF;
+    let face: Vec<u32> = ins
+        .iter()
+        .filter(|i| op(i) == DECORATE && i.len() == 4 && i[2] == 11 && i[3] == 17)
+        .map(|i| i[1])
+        .collect();
+    let loads: Vec<u32> = ins
+        .iter()
+        .filter(|i| op(i) == LOAD && i.len() >= 4 && face.contains(&i[3]))
+        .map(|i| i[2])
+        .collect();
+    let constant = |id: u32| {
+        ins.iter()
+            .find(|i| op(i) == CONSTANT && i.len() == 4 && i[2] == id)
+            .map(|i| i[3])
+    };
+    ins.iter().any(|i| {
+        op(i) == SELECT
+            && i.len() == 6
+            && loads.contains(&i[3])
+            && constant(i[4]) == Some(1)
+            && constant(i[5]) == Some(0)
+    })
+}
+
+/// A `[[front_facing]]` read as `i8` lowers as the `i1` read does (B19: before, its stage IO was
+/// refused, `Lowering(StageIo)` on argument 0, and every RenderBox path fill failed in the iOS
+/// Simulator's Metal), and its load gives 1 for a front face, 0 for a back face.
+#[test]
+fn a_front_facing_read_as_an_integer_lowers() {
+    let Some(bc) = assemble_text("front_facing_forms", FRONT_FACING_FORMS) else {
+        return;
+    };
+    let lib = Library::from_air(&bc).expect("library");
+    let vertex = lib.function("face_vertex").expect("vertex");
+    // vk12-floor: the profile that decides the narrow integer's form
+    for stem in ["lavapipe", "vk12-floor"] {
+        let dev = device(stem);
+        // face_i1: the toolchain's form, as a control
+        for name in ["face_i8", "face_i1"] {
+            let mut d = RenderPipelineDescriptor::new(StageSource::Function(
+                FunctionDescriptor::new(vertex.clone()),
+            ));
+            d.fragment = Some(StageSource::Function(FunctionDescriptor::new(
+                lib.function(name).expect(name),
+            )));
+            d.color_attachments[0] = Some(ColorAttachmentDescriptor::new(
+                metal::PixelFormat::RGBA8Unorm,
+            ));
+            let pipe = dev
+                .compile_render_pipeline(&d, &Budget::standard())
+                .unwrap_or_else(|e| panic!("{stem} {name}: {e}"));
+            if name == "face_i8" {
+                assert!(
+                    selects_one_for_a_front_face(&pipe.stages[1].spirv),
+                    "{stem}: the i8 face isn't 1 for a front face and 0 for a back face"
+                );
+            }
+            for s in &pipe.stages {
+                l3(&s.spirv, &pipe.requirements, &dev);
+            }
+        }
+    }
+}
+
 /// `text` assembled by `llvm-as`, or `None` (skipped visibly) without it. The scratch directory
 /// is removed before returning.
 fn assemble_text(name: &str, text: &str) -> Option<Vec<u8>> {
