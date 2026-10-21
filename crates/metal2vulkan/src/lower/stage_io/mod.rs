@@ -827,6 +827,19 @@ fn bool_as_uint(cx: &EmitCx<'_>, link: &Link) -> bool {
         )
 }
 
+/// Whether `link` reads a `bool` builtin into an integer (an `i8` `[[front_facing]]`): the load is
+/// 1 where the builtin is true, else 0.
+fn int_from_bool(cx: &EmitCx<'_>, link: &Link) -> bool {
+    matches!(link.form.held, Held::Int { .. })
+        && matches!(
+            cx.plan.families.stage_io.objects.get(link.object),
+            Some(IoObject::Builtin {
+                shape: Shape::Bool,
+                ..
+            })
+        )
+}
+
 /// The `uint` form with the lanes of `form`.
 fn uint_lanes(form: Form) -> Form {
     form.with(Held::Int {
@@ -849,6 +862,11 @@ fn to_lowered(
     if bool_as_uint(cx, link) {
         let zero = ops::splat(fb, uint_lanes(form), 0)?;
         return fb.binary(BinOp::INotEqual, x, zero);
+    }
+    if int_from_bool(cx, link) {
+        let one = ops::splat(fb, form, 1)?;
+        let zero = ops::splat(fb, form, 0)?;
+        return fb.select(x, one, zero);
     }
     let x = ops::mask(fb, form, x)?;
     narrow::round(fb, form, x)

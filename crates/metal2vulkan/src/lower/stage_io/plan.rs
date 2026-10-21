@@ -1349,8 +1349,12 @@ fn input_builtin(
                 None,
             )
         }
+        // The face as a `bool`, or as an integer of at most 32 bits holding 0 or 1: AIR of Apple's
+        // compiler service passes the `bool` argument as `i8` and truncates it (B19, RenderBox's
+        // `path_interior_fragment` from the iOS Simulator's MTLCompilerService); the load converts.
         Bi::FrontFacing if !vertex => {
-            if f.held != Held::Bool || f.lanes != 1 {
+            let integer = matches!(f.held, Held::Int { container: 32, .. });
+            if !(f.held == Held::Bool || integer) || f.lanes != 1 {
                 return Err(not_lowered());
             }
             (

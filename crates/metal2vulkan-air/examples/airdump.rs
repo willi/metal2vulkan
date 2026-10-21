@@ -4,7 +4,9 @@ use metal2vulkan_air::container::{parse, Library};
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let bytes = std::fs::read(&args[1]).unwrap();
-    let Library::Metallib(lib) = parse(&bytes).unwrap() else { panic!("not a metallib") };
+    let Library::Metallib(lib) = parse(&bytes).unwrap() else {
+        panic!("not a metallib")
+    };
     for f in &lib.functions {
         if f.name != args[2] {
             continue;

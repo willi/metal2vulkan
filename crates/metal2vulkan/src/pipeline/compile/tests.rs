@@ -2120,6 +2120,85 @@ entry:
 !9 = !{i32 0, !"air.position", !"air.center", !"air.no_perspective", !"air.arg_type_name", !"float4", !"air.arg_name", !"position"}
 "#;
 
+/// A fragment function that reads `[[front_facing]]` as `i8` and truncates it, as AIR from the
+/// iOS Simulator's compiler service passes a `bool` argument (B19: RenderBox's path fills), and one
+/// that reads it as `i1`, as the toolchain's own AIR does; each picks its color by the face.
+const FRONT_FACING_FORMS: &str = r#"target datalayout = "e-p:64:64:64-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:64:64-f32:32:32-f64:64:64-v16:16:16-v24:32:32-v32:32:32-v48:64:64-v64:64:64-v96:128:128-v128:128:128-v192:256:256-v256:256:256-v512:512:512-v1024:1024:1024-n8:16:32"
+target triple = "air64_v28-apple-macosx26.0.0"
+
+define <4 x float> @face_vertex(i32 %vid) {
+entry:
+  %f = uitofp i32 %vid to float
+  %v = insertelement <4 x float> <float poison, float 0.0, float 0.0, float 1.0>, float %f, i64 0
+  ret <4 x float> %v
+}
+
+define <4 x float> @face_i8(i8 %face) {
+entry:
+  %b = trunc i8 %face to i1
+  %v = select i1 %b, <4 x float> <float 1.0, float 0.0, float 0.0, float 1.0>, <4 x float> <float 0.0, float 1.0, float 0.0, float 1.0>
+  ret <4 x float> %v
+}
+
+define <4 x float> @face_i1(i1 %face) {
+entry:
+  %v = select i1 %face, <4 x float> <float 1.0, float 0.0, float 0.0, float 1.0>, <4 x float> <float 0.0, float 1.0, float 0.0, float 1.0>
+  ret <4 x float> %v
+}
+
+!air.vertex = !{!0}
+!air.fragment = !{!5, !10}
+!0 = !{ptr @face_vertex, !1, !3}
+!1 = !{!2}
+!2 = !{!"air.position", !"air.arg_type_name", !"float4"}
+!3 = !{!4}
+!4 = !{i32 0, !"air.vertex_id", !"air.arg_type_name", !"uint", !"air.arg_name", !"vid"}
+!5 = !{ptr @face_i8, !6, !8}
+!6 = !{!7}
+!7 = !{!"air.render_target", i32 0, i32 0, !"air.arg_type_name", !"float4"}
+!8 = !{!9}
+!9 = !{i32 0, !"air.front_facing", !"air.arg_type_name", !"bool", !"air.arg_name", !"front_facing"}
+!10 = !{ptr @face_i1, !6, !8}
+"#;
+
+/// A `[[front_facing]]` read as `i8` lowers as the `i1` read does (B19: before, its stage IO was
+/// refused, `Lowering(StageIo)` on argument 0, and every RenderBox path fill failed in the iOS
+/// Simulator's Metal), and its module reads the `FrontFacing` builtin.
+#[test]
+fn a_front_facing_read_as_an_integer_lowers() {
+    let Some(bc) = assemble_text("front_facing_forms", FRONT_FACING_FORMS) else {
+        return;
+    };
+    let lib = Library::from_air(&bc).expect("library");
+    let vertex = lib.function("face_vertex").expect("vertex");
+    for stem in ["lavapipe", "moltenvk-m3", "vk12-floor"] {
+        let dev = device(stem);
+        for name in ["face_i8", "face_i1"] {
+            let mut d = RenderPipelineDescriptor::new(StageSource::Function(
+                FunctionDescriptor::new(vertex.clone()),
+            ));
+            d.fragment = Some(StageSource::Function(FunctionDescriptor::new(
+                lib.function(name).expect(name),
+            )));
+            d.color_attachments[0] = Some(ColorAttachmentDescriptor::new(
+                metal::PixelFormat::RGBA8Unorm,
+            ));
+            let pipe = dev
+                .compile_render_pipeline(&d, &Budget::standard())
+                .unwrap_or_else(|e| panic!("{stem} {name}: {e}"));
+            let fragment = &pipe.stages[1].spirv;
+            // OpDecorate <id> BuiltIn FrontFacing: opcode 71, decoration 11, builtin 17
+            let reads_face = fragment
+                .windows(4)
+                .any(|w| w[0] == (4 << 16 | 71) && w[2] == 11 && w[3] == 17);
+            assert!(reads_face, "{stem} {name}: no FrontFacing builtin");
+            for s in &pipe.stages {
+                l3(&s.spirv, &pipe.requirements, &dev);
+            }
+        }
+    }
+}
+
 /// `text` assembled by `llvm-as`, or `None` (skipped visibly) without it. The scratch directory
 /// is removed before returning.
 fn assemble_text(name: &str, text: &str) -> Option<Vec<u8>> {
