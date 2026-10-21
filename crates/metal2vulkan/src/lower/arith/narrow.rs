@@ -17,10 +17,12 @@
 //! module takes the same forms though neither is measured to be Metal's: the conversion where the
 //! profile has `shaderFloat16`, else the quantize, recording `PrecisionNote::NativeHalfConversion`
 //! or `NativeHalfQuantize` instead of requiring a fact; `HalfRoundingPolicy::Exact` keeps the
-//! integer form. A sum or difference, exact in `f32` below the smallest normal half, keeps its
-//! `f32` value there instead ([`round_exact_below_normal`]); a texel's `half` takes the same
-//! rounding and keeps the NaN the device decoded ([`round_texel`]); `bfloat` rounds through an
-//! exact integer round-to-nearest-even of the `f32` bits. Where the device's 16-bit `+ - *`, kept
+//! integer form, and `HalfRoundingPolicy::ExactRte` takes the device's conversion under the entry's
+//! `RoundingModeRTE` where the profile's float controls allow it, with the integer form's arm below
+//! the smallest normal half and Metal's NaN ([`QuantizeForm::Rte`]). A sum or difference, exact in
+//! `f32` below the smallest normal half, keeps its `f32` value there instead
+//! ([`round_exact_below_normal`]); a texel's `half` takes the same rounding and keeps the NaN the
+//! device decoded ([`round_texel`]); `bfloat` rounds through an exact integer round-to-nearest-even of the `f32` bits. Where the device's 16-bit `+ - *`, kept
 //! apart, is measured to be Metal's `half` arithmetic (`DriverDeviation::MetalHalfArithmetic`) and
 //! the profile has `shaderFloat16`, a `half` `+ - *` is that instruction between exact conversions
 //! instead, with no rounding here (`ops::f16_binary`). For `+ - * /` and square root the double
@@ -50,8 +52,8 @@ use crate::spirv::builder::{FunctionBuilder, NarrowFmt, QuantizeForm};
 use crate::spirv::error::BResult;
 use crate::spirv::ids::Value;
 use crate::spirv::ir::{
-    BinOp, ConstBits, ConstKind, Constant, Contraction, ConvOp, GlslOp, Inst, Type, TypedModule, UnOp,
-    ValueOrigin,
+    BinOp, ConstBits, ConstKind, Constant, Contraction, ConvOp, GlslOp, Inst, Type, TypedModule,
+    UnOp, ValueOrigin,
 };
 
 /// The unsigned 32-bit integer form with `f`'s lanes.
@@ -73,16 +75,15 @@ pub fn round_words(f: Form) -> u32 {
 }
 
 /// An upper estimate of the SPIR-V words of one [`round`] on form `f` in quantize form `q`: for
-/// `half`, [`QuantizeForm::Integer`]'s twenty instructions and its twelve constants' share; the
-/// device's quantize or conversion ([`QuantizeForm::Device`], [`QuantizeForm::Converted`]), at most
-/// six instructions and their constants, the bound of 64 words and 4 per lane, so that the choices
-/// weighing it (`fma::complete`) stay as they were on those profiles; a dozen instructions for
-/// `bfloat`.
+/// `half`, [`QuantizeForm::Integer`]'s twenty instructions and its twelve constants' share, which
+/// also bounds [`QuantizeForm::Rte`]'s dozen; the device's quantize or conversion
+/// ([`QuantizeForm::Device`], [`QuantizeForm::Converted`]), at most six instructions and their
+/// constants, the bound of 64 words and 4 per lane, so that the choices weighing it
+/// (`fma::complete`) stay as they were on those profiles; a dozen instructions for `bfloat`.
 pub fn round_words_in(q: QuantizeForm, f: Form) -> u32 {
     let lanes = u32::from(f.lanes);
     match (f.float_fmt(), q) {
-        (Some(FloatFmt::Half), QuantizeForm::Integer) => 200 + 12 * lanes,
-        (Some(FloatFmt::Half), QuantizeForm::Rte) => 200 + 12 * lanes,
+        (Some(FloatFmt::Half), QuantizeForm::Integer | QuantizeForm::Rte) => 200 + 12 * lanes,
         (Some(FloatFmt::Half), QuantizeForm::Device | QuantizeForm::Converted) => 64 + 4 * lanes,
         (Some(FloatFmt::BFloat), _) => 96,
         _ => 0,
@@ -313,9 +314,14 @@ fn rte_supported(p: &DeviceProfile) -> bool {
 
 /// `x` (`f32` lanes of form `wide`) rounded to `half` by the device's conversion to 16 bits and
 /// its widening ([`QuantizeForm::Rte`]), each decorated `NoContraction`, under the entry's
-/// `RoundingModeRTE` at 16 bits, which makes the conversion round to nearest even. The decoration
-/// keeps the pair: Mesa marks a `NoContraction` result exact, and its fold of `f2f32(f2f16(a))`
-/// to `a` takes inexact values only.
+/// `RoundingModeRTE` and `SignedZeroInfNanPreserve` at 16 bits: the conversion rounds to nearest
+/// even, gives the infinity of the sign from 65520 up and keeps a zero's sign. The decoration keeps
+/// the pair: Mesa marks a `NoContraction` result exact, and its fold of `f2f32(f2f16(a))` to `a`
+/// takes inexact values only. What the float controls leave the device's is not taken from it:
+/// below the smallest normal half, where a device may flush a 16-bit denormal
+/// (`shaderDenormPreserveFloat16` is not asked for), the result is as `below` states, [`scaled`]'s
+/// or `x` itself, as in [`integer`]; and a NaN is Metal's `0x7E00`, widened, where the conversion
+/// keeps a NaN's sign (Mesa 25.2.8's lavapipe: `-NaN` to `0xFE00`, measured on every `f32`).
 fn rte(fb: &mut FunctionBuilder<'_>, wide: Form, x: Value, below: Below) -> BResult<Value> {
     let e = fb.module().ty(Type::Float { width: 16 })?;
     let h = match wide.lanes {
@@ -325,8 +331,25 @@ fn rte(fb: &mut FunctionBuilder<'_>, wide: Form, x: Value, below: Below) -> BRes
     let w = ty(fb, wide)?;
     let n = fb.convert_with(ConvOp::FConvert, x, h, Contraction::Forbidden)?;
     let c = fb.convert_with(ConvOp::FConvert, n, w, Contraction::Forbidden)?;
-    let _ = below;
-    Ok(c)
+    // The tests read the magnitude's bits, so no float mode of the module can fold them.
+    let u = u32_form(wide);
+    let ut = ty(fb, u)?;
+    let b = fb.convert(ConvOp::Bitcast, x, ut)?;
+    let abs_mask = splat(fb, u, 0x7FFF_FFFF)?;
+    let mag = bin(fb, BinOp::BitwiseAnd, b, abs_mask)?;
+    // Below the smallest normal half, 2^-14: `below`.
+    let normal = splat(fb, u, 0x3880_0000)?;
+    let small = bin(fb, BinOp::ULessThan, mag, normal)?;
+    let d = match below {
+        Below::Scaled => scaled(fb, wide, x)?,
+        Below::Kept => x,
+    };
+    let r = fb.select(small, d, c)?;
+    // A NaN: Metal's.
+    let inf = splat(fb, u, 0x7F80_0000)?;
+    let nan = bin(fb, BinOp::UGreaterThan, mag, inf)?;
+    let metal_nan = splat(fb, wide, 0x7FC0_0000)?;
+    fb.select(nan, metal_nan, r)
 }
 
 /// Whether module `m` rounds to `half` through [`converted`]: an `OpFConvert` of an `f32` to 16

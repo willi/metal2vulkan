@@ -205,8 +205,9 @@ pub enum QuantizeForm {
     Converted,
     /// No quantize and no measured fact: `OpFConvert` to a 16-bit float and back, each decorated
     /// `NoContraction`, under the entry's `RoundingModeRTE` at 16 bits, which makes the conversion
-    /// round to nearest even (`HalfRoundingPolicy::ExactRte`, on a profile with `shaderFloat16`
-    /// and those float controls; `narrow::rte`).
+    /// round to nearest even, with `Integer`'s arm below the smallest normal half and Metal's NaN
+    /// (`HalfRoundingPolicy::ExactRte`, on a profile with `shaderFloat16` and those float
+    /// controls; `narrow::rte`).
     Rte,
 }
 
