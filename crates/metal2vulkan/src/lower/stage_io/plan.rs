@@ -1353,9 +1353,9 @@ fn input_builtin(
         // compiler service passes the `bool` argument as `i8` and truncates it (B19, RenderBox's
         // `path_interior_fragment` from the iOS Simulator's MTLCompilerService); the load converts.
         Bi::FrontFacing if !vertex => {
-            let integer = matches!(f.held, Held::Int { container: 32, .. });
-            if !(f.held == Held::Bool || integer) || f.lanes != 1 {
-                return Err(not_lowered());
+            match (f.held, f.lanes) {
+                (Held::Bool, 1) | (Held::Int { container: 32, .. }, 1) => {}
+                _ => return Err(not_lowered()),
             }
             (
                 B::FrontFacing,

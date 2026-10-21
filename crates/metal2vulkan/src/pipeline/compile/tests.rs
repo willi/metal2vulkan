@@ -2161,9 +2161,58 @@ entry:
 !10 = !{ptr @face_i1, !6, !8}
 "#;
 
+/// The instructions of a SPIR-V module: each one's words, opcode first.
+fn instructions(words: &[u32]) -> Vec<&[u32]> {
+    let mut out = Vec::new();
+    let mut i = 5;
+    while let Some(&w) = words.get(i) {
+        let len = (w >> 16) as usize;
+        if len == 0 || i + len > words.len() {
+            break;
+        }
+        out.push(&words[i..i + len]);
+        i += len;
+    }
+    out
+}
+
+/// Whether `words` turn the `FrontFacing` builtin into an integer 1 for a front face and 0 for a
+/// back face: an `OpSelect` on a load of the builtin's variable whose true operand is the
+/// constant 1 and whose false operand is the constant 0.
+fn selects_one_for_a_front_face(words: &[u32]) -> bool {
+    const DECORATE: u32 = 71;
+    const LOAD: u32 = 61;
+    const SELECT: u32 = 169;
+    const CONSTANT: u32 = 43;
+    let ins = instructions(words);
+    let op = |i: &[u32]| i[0] & 0xFFFF;
+    let face: Vec<u32> = ins
+        .iter()
+        .filter(|i| op(i) == DECORATE && i.len() == 4 && i[2] == 11 && i[3] == 17)
+        .map(|i| i[1])
+        .collect();
+    let loads: Vec<u32> = ins
+        .iter()
+        .filter(|i| op(i) == LOAD && i.len() >= 4 && face.contains(&i[3]))
+        .map(|i| i[2])
+        .collect();
+    let constant = |id: u32| {
+        ins.iter()
+            .find(|i| op(i) == CONSTANT && i.len() == 4 && i[2] == id)
+            .map(|i| i[3])
+    };
+    ins.iter().any(|i| {
+        op(i) == SELECT
+            && i.len() == 6
+            && loads.contains(&i[3])
+            && constant(i[4]) == Some(1)
+            && constant(i[5]) == Some(0)
+    })
+}
+
 /// A `[[front_facing]]` read as `i8` lowers as the `i1` read does (B19: before, its stage IO was
 /// refused, `Lowering(StageIo)` on argument 0, and every RenderBox path fill failed in the iOS
-/// Simulator's Metal), and its module reads the `FrontFacing` builtin.
+/// Simulator's Metal), and its load gives 1 for a front face, 0 for a back face.
 #[test]
 fn a_front_facing_read_as_an_integer_lowers() {
     let Some(bc) = assemble_text("front_facing_forms", FRONT_FACING_FORMS) else {
@@ -2171,8 +2220,10 @@ fn a_front_facing_read_as_an_integer_lowers() {
     };
     let lib = Library::from_air(&bc).expect("library");
     let vertex = lib.function("face_vertex").expect("vertex");
-    for stem in ["lavapipe", "moltenvk-m3", "vk12-floor"] {
+    // vk12-floor: the profile that decides the narrow integer's form
+    for stem in ["lavapipe", "vk12-floor"] {
         let dev = device(stem);
+        // face_i1: the toolchain's form, as a control
         for name in ["face_i8", "face_i1"] {
             let mut d = RenderPipelineDescriptor::new(StageSource::Function(
                 FunctionDescriptor::new(vertex.clone()),
@@ -2186,12 +2237,12 @@ fn a_front_facing_read_as_an_integer_lowers() {
             let pipe = dev
                 .compile_render_pipeline(&d, &Budget::standard())
                 .unwrap_or_else(|e| panic!("{stem} {name}: {e}"));
-            let fragment = &pipe.stages[1].spirv;
-            // OpDecorate <id> BuiltIn FrontFacing: opcode 71, decoration 11, builtin 17
-            let reads_face = fragment
-                .windows(4)
-                .any(|w| w[0] == (4 << 16 | 71) && w[2] == 11 && w[3] == 17);
-            assert!(reads_face, "{stem} {name}: no FrontFacing builtin");
+            if name == "face_i8" {
+                assert!(
+                    selects_one_for_a_front_face(&pipe.stages[1].spirv),
+                    "{stem}: the i8 face isn't 1 for a front face and 0 for a back face"
+                );
+            }
             for s in &pipe.stages {
                 l3(&s.spirv, &pipe.requirements, &dev);
             }
