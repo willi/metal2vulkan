@@ -2179,6 +2179,7 @@ field	metal2vulkan-runtime::DeviceOptions.device_extensions	pub device_extension
 field	metal2vulkan-runtime::DeviceOptions.encoder_trail	pub encoder_trail: bool
 field	metal2vulkan-runtime::DeviceOptions.extra_queues	pub extra_queues: Vec<vk::QueueFlags>
 field	metal2vulkan-runtime::DeviceOptions.fail_in_place_check	pub fail_in_place_check: bool
+field	metal2vulkan-runtime::DeviceOptions.get_instance_proc_addr	pub get_instance_proc_addr: Option<ash::vk::PFN_vkGetInstanceProcAddr>
 field	metal2vulkan-runtime::DeviceOptions.gpu_times_from_host	pub gpu_times_from_host: bool
 field	metal2vulkan-runtime::DeviceOptions.instance_api_version	pub instance_api_version: Option<ApiVersion>
 field	metal2vulkan-runtime::DeviceOptions.instance_extensions	pub instance_extensions: Vec<CString>

@@ -574,6 +574,8 @@ mod posted_frees;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
 mod primed_devices;
 mod private_properties;
+#[cfg(all(target_os = "linux", any(m2v_gpu, m2v_cpu_icd)))]
+mod proc_addr_entry;
 mod push_raw_writes;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
 mod query_reset_gap;

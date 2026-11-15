@@ -2239,7 +2239,7 @@ fn the_device_s_functions_are_reached_through_checked_accessors() {
 /// tuple field, a type argument or a by-value parameter) fails
 /// `only_the_listed_modules_keep_the_device_s_functions`; so does a listed module that keeps none
 /// any more.
-const KEEPERS: [(&str, &str); 32] = [
+const KEEPERS: [(&str, &str); 34] = [
     (
         "binding.rs",
         "the push command (vkCmdPushDescriptorSet), a call's parameter (`push_set`) and the \
@@ -2255,7 +2255,17 @@ const KEEPERS: [(&str, &str); 32] = [
          hold of the device lets go in its teardown (`unregister`); a making for a device \
          without a record fails before any driver",
     ),
+    (
+        "device/create.rs",
+        "the consumer's vkGetInstanceProcAddr (`DeviceOptions::get_instance_proc_addr`), which the \
+         instance is made through; the consumer keeps its library loaded",
+    ),
     ("device/functions.rs", "the device's functions themselves"),
+    (
+        "device/line.rs",
+        "the options the line makes its next `VkDevice` of (`Recipe`), the consumer's \
+         vkGetInstanceProcAddr among them",
+    ),
     (
         "device/mod.rs",
         "the device's shared state, which the teardown ends",
