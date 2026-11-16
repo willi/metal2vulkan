@@ -4,6 +4,8 @@
 operation (its `float` and `half` arithmetic and functions, NaN bits, minimum and maximum, rounding,
 texel and colour conversions, sampler and filters, resolves), that form is the only one: no path
 emulates Metal's bits. What the device lacks is still implemented or emulated, as capability.
+One opt-in switch rounds `half` as Metal does where the device rounds natively, outside the
+first table and `exact_answers()` ("Metal's `half` rounding, by name", below).
 
 **An accuracy note is logged, never fatal.** Each difference from Metal is recorded in the
 pipeline's artifact as a `PrecisionNote` and announced as `metal2vulkan-degrade-<code>` when the
@@ -55,6 +57,17 @@ All at once: `DevicePolicy::exact_answers()` sets every switch above; each row s
 
 Speed choices that change no answer (the roll pass's floor; a specialization measured free) are not
 rows.
+
+## Metal's `half` rounding, by name
+
+This switch emulates Metal's bits where the device has a native form, so it is not in the table
+above, and `DevicePolicy::exact_answers()` leaves it as it is: a caller sets it by name. The
+validation and conformance runs under `exact_answers()` expect the device's rounding notes, which
+`Exact` removes. `FORK.md` records why this tree keeps it.
+
+| What it is | Default | Switch | Recorded bound of the default (note, code) | Cost of the switch |
+|---|---|---|---|---|
+| A `half` result computed in `float` (every `half` operation but the device's 16-bit instructions, and a conversion of a `float` to `half`) and a `half` texel, rounded to `half` by the device's own rounding: its `OpQuantizeToF16` without `shaderFloat16`, else its conversion to 16 bits and back (`lower::arith::narrow::round`). Where the profile rounds through that conversion under the 16-bit float controls, which make it Metal's by the Vulkan spec, on a driver that does not fuse arithmetic into it, both values emit the same module. | `half_rounding = HalfRoundingPolicy::Native` | `half_rounding = HalfRoundingPolicy::Exact`: integer arithmetic on the `float`'s bits, Metal's `half(float)` on every device (to nearest even, half denormals kept, an infinity from 65520 up, `0x7E00` for a NaN); a `half` texel keeps the NaN the device decoded (a texel class whose Metal `half` is not its value's rounding reads as under the default), and a fast-math `half` chain rounds at each operation whatever `half_chains` holds. A `half` read from or written to its bits stays the device's widening or narrowing | The quantize may answer a zero below the smallest normal half, where Metal answers the half denormal; the conversion's rounding, and a driver's fusing of arithmetic into it, are the device's. `NativeHalfQuantize` (`native-half-quantize`), `NativeHalfConversion` (`native-half-conversion`) | Not timed. About twenty instructions a rounding against the device's one or two |
 
 ## Not speed choices: device gaps
 

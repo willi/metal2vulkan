@@ -1339,3 +1339,127 @@ fn half_arithmetic_on_the_device_takes_the_airs_contraction() {
         "the float-controls profiles compute it"
     );
 }
+
+/// The default policy with Metal's half rounding (`HalfRoundingPolicy::Exact`).
+fn exact_half() -> DevicePolicy {
+    DevicePolicy {
+        half_rounding: crate::device::HalfRoundingPolicy::Exact,
+        ..DevicePolicy::default()
+    }
+}
+
+/// Under Metal's half rounding (`HalfRoundingPolicy::Exact`) every kernel, of `half` arithmetic and
+/// of `float` arithmetic rounded to `half`, rounds by integer arithmetic on every committed
+/// profile: no `OpQuantizeToF16`, no conversion pair, no native rounding note, and L3 passes. The
+/// one exception is a profile under the float controls whose driver does not fuse arithmetic into
+/// the conversion, whose own rounding is Metal's by the Vulkan spec: it emits the default policy's
+/// module, word for word. Those profiles are listed by name, so a profile that moves to either
+/// side fails here.
+#[test]
+fn exact_half_rounding_is_metals_on_every_profile() {
+    use crate::lower::arith::narrow::{quantizes, rounds_by_conversion};
+    const SPEC_EXACT: [&str; 4] = [
+        "intel-arl-anv",
+        "intel-irisxe-anv",
+        "intel-irisxe-rplp-anv",
+        "intel-uhd770-rpls-anv",
+    ];
+    let (Some(plain), Some(arith)) = (
+        bitcode(),
+        assemble("exact-half-arithmetic", &module_of(&ARITHMETIC)),
+    ) else {
+        return;
+    };
+    let natives = [
+        PrecisionNote::NativeHalfConversion,
+        PrecisionNote::NativeHalfQuantize,
+    ];
+    let defaults = committed_profiles().expect("profiles");
+    let exacts = crate::spirv::testing::committed_profiles_with(exact_half()).expect("profiles");
+    assert_eq!(defaults.len(), exacts.len());
+    let mut seen = (0, 0);
+    for ((stem, d), (other, e)) in defaults.iter().zip(&exacts) {
+        assert_eq!(stem, other);
+        let spec_exact = SPEC_EXACT.contains(&stem.as_str());
+        if spec_exact {
+            seen.1 += 1;
+        } else {
+            seen.0 += 1;
+        }
+        for (bc, kernels) in [(&plain, &KERNELS[..]), (&arith, &ARITHMETIC[..])] {
+            for (name, _) in kernels {
+                let what = format!("{name} on {stem}");
+                let (a, _, m) =
+                    compile_kept(bc, name, e).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+                link_and_validate(&a, e).unwrap_or_else(|e| panic!("{what}: L3: {e}"));
+                if spec_exact {
+                    let b = compile(bc, name, d).unwrap_or_else(|e| panic!("{what}: {e:?}"));
+                    assert_eq!(a.module, b.module, "{what}: the default policy's module");
+                    continue;
+                }
+                assert!(
+                    !natives.iter().any(|n| a.precision.contains(n)),
+                    "{what}: {:?}",
+                    a.precision
+                );
+                assert!(!quantizes(&m), "{what}: OpQuantizeToF16");
+                assert!(
+                    !rounds_by_conversion(&m, &mut meter()).expect("scan"),
+                    "{what}: a conversion pair"
+                );
+            }
+        }
+    }
+    assert!(
+        seen.0 > 0 && seen.1 == SPEC_EXACT.len(),
+        "integer-rounding and spec-exact profiles: {seen:?}"
+    );
+}
+
+/// Under Metal's half rounding, on the interpreter, a `half` below the smallest normal is Metal's
+/// half denormal on a profile without `shaderFloat16` too, where the device's quantize answers a
+/// zero by default (`a_half_below_the_smallest_normal_takes_the_devices_quantize`); a tie, 65519
+/// and 65520 round as Metal's on either form. And a fast-math chain of `half` operations there is
+/// no longer held at `float` between them (`half_chain::plan`): each operation rounds.
+#[test]
+fn exact_half_rounding_keeps_half_denormals_and_rounds_each_chain_operation() {
+    let Some(bc) = bitcode() else {
+        return;
+    };
+    for stem in ["lavapipe", "swiftshader"] {
+        let p = profile(stem, exact_half()).expect("profile");
+        let run = |name: &str, x: [f32; 2]| interpret(&bc, name, &p, x);
+        let tie = 1.0 + 2f32.powi(-11);
+        assert_eq!(run("half_narrow", [tie, 0.0]), 1.0, "{stem}: a tie to even");
+        assert_eq!(run("half_narrow", [65519.0, 0.0]), 65504.0, "{stem}");
+        assert_eq!(run("half_narrow", [65520.0, 0.0]), f32::INFINITY, "{stem}");
+        let denormal = 3.0 * 2f32.powi(-24);
+        assert_eq!(
+            run("half_narrow", [denormal + 2f32.powi(-27), 0.0]),
+            denormal,
+            "{stem}: a half denormal"
+        );
+        assert_eq!(
+            run("half_sum", [denormal, -(2f32.powi(-24))]),
+            2.0 * 2f32.powi(-24),
+            "{stem}: a sum below the smallest normal"
+        );
+    }
+    let chain = (
+        "half_chain",
+        "  %ha = fptrunc float %a to half\n  %hb = fptrunc float %b to half\n  %s = fadd reassoc contract half %ha, %hb\n  %t = fmul reassoc contract half %s, %hb\n  %r = fpext half %t to float\n",
+    );
+    let Some(cbc) = assemble("exact-half-chain", &module_of(&[chain])) else {
+        return;
+    };
+    for (policy, held) in [(DevicePolicy::default(), true), (exact_half(), false)] {
+        let p = profile("swiftshader", policy).expect("profile");
+        let (_, plan, _) = compile_kept(&cbc, chain.0, &p).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(
+            !plan.families.arith.held_at_float.is_empty(),
+            held,
+            "{:?}: the chain's sum held at `float`",
+            policy.half_rounding
+        );
+    }
+}

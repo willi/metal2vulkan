@@ -236,6 +236,7 @@ surface! {
         enum RenderLoweringPolicy N;
         enum HostPageTexturePolicy N;
         enum HalfChainPolicy N;
+        enum HalfRoundingPolicy N;
         enum YCbCrInPlacePolicy N;
         enum PipelineWaitPolicy N;
         enum WideLinePolicy N;

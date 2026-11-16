@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::air::container::Hash256;
 use crate::device::requirements::{ApiVersion, FormatUsage, VkExtension, VkFeature, VkProperty};
 use crate::device::subgroup::{SimdClass, SubgroupModel, Tier};
+use crate::device::HalfRoundingPolicy;
 use crate::error::{Capability, DriverDeviation, Unsupported};
 use crate::memory::contain::Check;
 use crate::pipeline::sym::Stage;
@@ -53,6 +54,10 @@ const SPIRV_VAL_RELAXATIONS: [(VkFeature, &str); 5] = [
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceProfile {
     fields: ProfileFields,
+    /// Whose rounding a `half` result computed in `float` takes (`DevicePolicy::half_rounding`).
+    /// Held beside the fields, not in them, so that a profile under the default keeps the
+    /// fingerprint it has without this policy ([`fingerprint_of`]).
+    half_rounding: HalfRoundingPolicy,
     /// [`DeviceProfile::fingerprint`], derived once here, where the fields are fixed.
     ///
     /// Deriving it renders every field of the profile -- a format table alone is tens of
@@ -69,10 +74,11 @@ impl DeviceProfile {
     /// The profile of `fields`, with its fingerprint derived (the only way to build one): the
     /// fingerprint is a function of the fields, so holding them together is what keeps it true of
     /// them. A test's edit goes through `edit`, which only the crate's tests build.
-    pub(crate) fn of(fields: ProfileFields) -> DeviceProfile {
-        let fingerprint = fingerprint_of(&fields);
+    pub(crate) fn of(fields: ProfileFields, half_rounding: HalfRoundingPolicy) -> DeviceProfile {
+        let fingerprint = fingerprint_of(&fields, half_rounding);
         DeviceProfile {
             fields,
+            half_rounding,
             fingerprint,
         }
     }
@@ -83,7 +89,7 @@ impl DeviceProfile {
     #[cfg(test)]
     pub(crate) fn edit<T>(&mut self, change: impl FnOnce(&mut ProfileFields) -> T) -> T {
         let answer = change(&mut self.fields);
-        self.fingerprint = fingerprint_of(&self.fields);
+        self.fingerprint = fingerprint_of(&self.fields, self.half_rounding);
         answer
     }
 
@@ -91,6 +97,11 @@ impl DeviceProfile {
     /// [`DeviceProfile::fingerprint`] and read its facts through the accessors.
     pub(crate) fn fields(&self) -> &ProfileFields {
         &self.fields
+    }
+
+    /// Whose rounding a `half` result computed in `float` takes (`DevicePolicy::half_rounding`).
+    pub(crate) fn half_rounding(&self) -> HalfRoundingPolicy {
+        self.half_rounding
     }
 
     /// What the consumer enabled on the device, as the capability vocabulary
@@ -470,7 +481,10 @@ pub(crate) fn fingerprints_derived() -> u64 {
 /// The fingerprint of `fields` ([`DeviceProfile::fingerprint`]): the rendering streams into the
 /// hash, because a materialized rendering of a profile with a format table is tens of kilobytes
 /// that no input-scaled ledger charge accounts for.
-fn fingerprint_of(fields: &ProfileFields) -> Hash256 {
+///
+/// `half_rounding` is hashed only when it is not the default, so a default profile's
+/// fingerprint is the one it has without that policy, and an `Exact` profile keys apart.
+fn fingerprint_of(fields: &ProfileFields, half_rounding: HalfRoundingPolicy) -> Hash256 {
     use sha2::{Digest, Sha256};
     use std::fmt::Write as _;
     struct Hashing(Sha256);
@@ -486,6 +500,9 @@ fn fingerprint_of(fields: &ProfileFields) -> Hash256 {
     // `Hashing` never fails, and `Debug` of these plain-data types only fails when the
     // writer does.
     let _ = write!(h, "{:?}", fields);
+    if half_rounding != HalfRoundingPolicy::Native {
+        let _ = write!(h, "\0half_rounding: {:?}", half_rounding);
+    }
     h.0.finalize().into()
 }
 

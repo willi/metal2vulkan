@@ -55,12 +55,17 @@
 //! ([`int_to_f32_odd`], [`int64_to_f32_odd`]), a `double` narrows through a round-to-odd
 //! `f32` ([`f64_to_f32_odd`]), and a `bfloat` fused multiply-add corrects its one inexact case
 //! ([`bf16_fma`]), so the final rounding is the only one that counts.
+//!
+//! Under `HalfRoundingPolicy::Exact` ([`exact_rounding`]) every `half` rounding is Metal's on every
+//! device instead: integer arithmetic on the `f32` bits ([`integer`]), whatever the form, which
+//! still decides how the module holds `half` values and moves their bits; no rounding note.
 
 mod merges;
 
 use crate::budget::Meter;
 use crate::device::profile::{DriverWorkaround, Independence};
 use crate::device::DeviceProfile;
+use crate::device::HalfRoundingPolicy;
 use crate::error::Error;
 use crate::lower::arith::legal::{FloatFmt, Form, Held};
 use crate::lower::arith::ops::{fsplat, splat, ty};
@@ -118,10 +123,15 @@ pub fn round_words_in(q: QuantizeForm, f: Form) -> u32 {
 /// ([`quantizes`]).
 /// [`QuantizeForm::Converted`]: [`converted`]'s alone, the device's conversion.
 /// [`QuantizeForm::Controlled`]: [`controlled`]'s alone, Metal's value by the Vulkan spec.
+/// Under Metal's rounding (`ModuleBuilder::exact_half`, [`exact_rounding`]), [`integer`]'s in every
+/// form.
 pub fn round(fb: &mut FunctionBuilder<'_>, f: Form, x: Value) -> BResult<Value> {
     match f.held {
         Held::Float(FloatFmt::Half) => {
             let wide = f.with(Held::Float(FloatFmt::F32));
+            if fb.module().exact_half() {
+                return integer(fb, wide, x);
+            }
             match fb.module().quantize_form() {
                 QuantizeForm::Converted => converted(fb, wide, x),
                 QuantizeForm::Controlled => controlled(fb, wide, x),
@@ -171,6 +181,78 @@ pub fn native_rounding(form: QuantizeForm) -> Option<PrecisionNote> {
     }
 }
 
+/// Whether profile `p`'s modules, whose `half` roundings take `form`, round by Metal's integer
+/// rounding instead ([`integer`]): under `HalfRoundingPolicy::Exact`, wherever the form is not
+/// already Metal's, which [`QuantizeForm::Controlled`] is by the Vulkan spec but on a driver that
+/// fuses arithmetic into the conversion (`DriverWorkaround::HalfConversionFusedWithArithmetic`,
+/// [`rounds_arithmetic`]).
+pub fn exact_rounding(p: &DeviceProfile, form: QuantizeForm) -> bool {
+    let fuses =
+        (p.fields().workarounds).contains(&DriverWorkaround::HalfConversionFusedWithArithmetic);
+    p.half_rounding() == HalfRoundingPolicy::Exact && (form != QuantizeForm::Controlled || fuses)
+}
+
+/// `x` (`f32` lanes of form `wide`) rounded to `half` by integer arithmetic on its bits, Metal's
+/// `half(float)` on every device and in every rounding mode, since no instruction of it rounds
+/// inexactly ([`exact_rounding`]). From the smallest normal half, `2^-14`, up, the half keeps the
+/// top 11 of the `f32`'s 24 significand bits, so adding `0xFFF` plus the lowest kept bit and
+/// clearing the 13 bits below it rounds to nearest even, once, as [`round_integer`] does; a carry
+/// out of the fraction raises the exponent, as it must. From 65520 up (`0x477FF000`: halfway
+/// between 65504 and `2^16`, which rounds to the even `2^16`), and for an infinity, the result is
+/// the infinity of `x`'s sign. A NaN gives `0x7E00`'s widening, `0x7FC00000`, of either sign and
+/// any payload: Metal converts every `float` NaN to `0x7E00`. Below `2^-14`, [`scaled`]'s.
+/// `texel_round::f32_to_half` to nearest even gives the same halves but takes about twice the
+/// instructions and answers a NaN its own way, so this stays separate.
+fn integer(fb: &mut FunctionBuilder<'_>, wide: Form, x: Value) -> BResult<Value> {
+    let u = u32_form(wide);
+    let ut = ty(fb, u)?;
+    let b = fb.convert(ConvOp::Bitcast, x, ut)?;
+    let abs_mask = splat(fb, u, 0x7FFF_FFFF)?;
+    let mag = bin(fb, BinOp::BitwiseAnd, b, abs_mask)?;
+    let k13 = splat(fb, u, 13)?;
+    let one = splat(fb, u, 1)?;
+    let lsb = bin(fb, BinOp::ShiftRightLogical, b, k13)?;
+    let lsb = bin(fb, BinOp::BitwiseAnd, lsb, one)?;
+    let half_ulp = splat(fb, u, 0xFFF)?;
+    let bias = bin(fb, BinOp::IAdd, half_ulp, lsb)?;
+    let r = bin(fb, BinOp::IAdd, b, bias)?;
+    let keep = splat(fb, u, 0xFFFF_E000)?;
+    let r = bin(fb, BinOp::BitwiseAnd, r, keep)?;
+    // From 65520 up: the infinity of the sign, or for a NaN Metal's NaN.
+    let below_edge = splat(fb, u, 0x477F_EFFF)?;
+    let over = bin(fb, BinOp::UGreaterThan, mag, below_edge)?;
+    let sign_mask = splat(fb, u, 0x8000_0000)?;
+    let sign = bin(fb, BinOp::BitwiseAnd, b, sign_mask)?;
+    let inf = splat(fb, u, 0x7F80_0000)?;
+    let signed_inf = bin(fb, BinOp::BitwiseOr, sign, inf)?;
+    let nan = bin(fb, BinOp::UGreaterThan, mag, inf)?;
+    let metal_nan = splat(fb, u, 0x7FC0_0000)?;
+    let big = fb.select(nan, metal_nan, signed_inf)?;
+    let r = fb.select(over, big, r)?;
+    // Below the smallest normal half: the half denormal grid's rounding.
+    let normal = splat(fb, u, 0x3880_0000)?;
+    let small = bin(fb, BinOp::ULessThan, mag, normal)?;
+    let d = scaled(fb, wide, x)?;
+    let d = fb.convert(ConvOp::Bitcast, d, ut)?;
+    let r = fb.select(small, d, r)?;
+    let ft = ty(fb, wide)?;
+    fb.convert(ConvOp::Bitcast, r, ft)
+}
+
+/// `x` (`f32` lanes of form `wide`) rounded to the half denormal grid, `RoundEven(x · 2^24) ·
+/// 2^-24`: the half of an `|x|` below the smallest normal half ([`integer`]). It is exact in every
+/// rounding mode: both products scale by a power of two into the normal `f32` range, and
+/// `RoundEven` is exact. It rounds to nearest even on the grid (`2^-24`), keeps the sign of a zero,
+/// and gives the smallest normal half where `x` rounds up to it. (An `f32` denormal `x` may be
+/// flushed by the device's multiply; its half is a signed zero either way.)
+fn scaled(fb: &mut FunctionBuilder<'_>, wide: Form, x: Value) -> BResult<Value> {
+    let up = fsplat(fb, wide, 16_777_216.0)?;
+    let down = fsplat(fb, wide, 1.0 / 16_777_216.0)?;
+    let s = bin(fb, BinOp::FMul, x, up)?;
+    let k = fb.glsl(GlslOp::RoundEven, &[s])?;
+    bin(fb, BinOp::FMul, k, down)
+}
+
 /// `x` (`f32` lanes of form `wide`) rounded to `half` by the device's conversion to 16 bits,
 /// `OpFConvert`, and widened back ([`QuantizeForm::Converted`]), recorded as
 /// `PrecisionNote::NativeHalfConversion`. The device's compiler may fold the conversion into the
@@ -202,10 +284,11 @@ fn converted_pair(fb: &mut FunctionBuilder<'_>, wide: Form, x: Value) -> BResult
 /// the `float` ([`rounds_unmeasured`]). In [`QuantizeForm::Converted`] the pair's narrowing is
 /// recorded as measured (`ModuleBuilder::note_measured_rounding`); every other form rounds as
 /// [`round`] does. A `half` an operation or a function computes in `float` is not this form:
-/// Metal computes it otherwise (its `half` `tanh`), and it takes [`round`].
+/// Metal computes it otherwise (its `half` `tanh`), and it takes [`round`]. Under Metal's rounding
+/// (`ModuleBuilder::exact_half`) every form rounds as [`round`] does.
 pub fn round_measured(fb: &mut FunctionBuilder<'_>, f: Form, x: Value) -> BResult<Value> {
     match (f.held, fb.module().quantize_form()) {
-        (Held::Float(FloatFmt::Half), QuantizeForm::Converted) => {
+        (Held::Float(FloatFmt::Half), QuantizeForm::Converted) if !fb.module().exact_half() => {
             let (n, w) = converted_pair(fb, f.with(Held::Float(FloatFmt::F32)), x)?;
             fb.module().note_measured_rounding(n);
             Ok(w)
@@ -558,6 +641,8 @@ pub fn round_texel_words(f: Form) -> u32 {
 /// under the float controls ([`QuantizeForm::Controlled`], `ModuleBuilder::native_half_nans`): the
 /// conversion keeps a NaN a NaN, its bits the device's, as the texel's decode is
 /// (`PrecisionNote::DeviceNanEncoding`, which the access records). Another form is [`round`]ed.
+/// Under Metal's rounding (`ModuleBuilder::exact_half`) the keep stands in every form: [`integer`]
+/// answers Metal's NaN, not the texel's.
 ///
 /// A `half` texel rounds as [`round_measured`] rounds a `float` the function holds: in
 /// [`QuantizeForm::Converted`] the pair's narrowing is recorded as measured
@@ -573,7 +658,9 @@ pub fn round_texel_words(f: Form) -> u32 {
 pub fn round_texel(fb: &mut FunctionBuilder<'_>, f: Form, x: Value) -> BResult<Value> {
     let native = fb.module().native_half();
     match f.held {
-        Held::Float(FloatFmt::Half) if native || fb.module().native_half_nans() => {
+        Held::Float(FloatFmt::Half)
+            if !fb.module().exact_half() && (native || fb.module().native_half_nans()) =>
+        {
             round_measured(fb, f, x)
         }
         Held::Float(FloatFmt::Half) => {

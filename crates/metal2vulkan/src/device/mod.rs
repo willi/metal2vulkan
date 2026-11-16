@@ -65,6 +65,7 @@ pub use enables::{EnableSet, Exposure};
 // The mechanism derivation: internal; a pipeline states each mechanism in its `dependencies`.
 pub(crate) use mechanism::mechanism;
 pub use metal::{MetalDeviceProperties, SimdSupport, StageSimd};
+pub use policy::HalfRoundingPolicy;
 pub use policy::{
     BatchOrderPolicy, CompletionPolicy, ContainmentPolicy, DevicePolicy, DontCareColorPolicy,
     ExtendedRangeBlitPolicy, HalfChainPolicy, HeapAnswerPolicy, HeapCompressionPolicy,

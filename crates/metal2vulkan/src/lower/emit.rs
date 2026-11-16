@@ -108,6 +108,7 @@ fn declare(mb: &mut ModuleBuilder, plan: &Plan) -> BResult<Declared> {
     mb.set_quantize_form(plan.families.arith.quantize);
     mb.set_native_half(plan.families.arith.native_half);
     mb.set_native_half_nans(plan.families.arith.native_half_nans);
+    mb.set_exact_half(plan.families.arith.exact_half);
     mb.set_half_controls(plan.families.arith.controls);
     let mut d = Declared::default();
     let modes = &mut d.modes;

@@ -123,6 +123,13 @@ pub struct DeviceOptions {
     /// Homebrew's `/opt/homebrew/lib` and `/usr/local/lib`. A loader that opens from none of
     /// them is [`Error::LoaderNotFound`], naming each.
     pub loader: Option<PathBuf>,
+    /// A loader's `vkGetInstanceProcAddr` the caller already resolved, used instead of opening
+    /// any library (`loader` is then ignored): for an application that already loaded Vulkan
+    /// itself (SDL's `SDL_Vulkan_GetVkGetInstanceProcAddr`, GLFW's `glfwGetInstanceProcAddress`,
+    /// a statically linked loader, or a wrapper over the loader's entry points). The caller keeps
+    /// the library that holds it loaded for the life of the process. Devices compare it by
+    /// address. No Metal counterpart.
+    pub get_instance_proc_addr: Option<ash::vk::PFN_vkGetInstanceProcAddr>,
     /// Only physical devices of these kinds qualify; empty admits every kind.
     pub kinds: Vec<DeviceKind>,
     /// Where the devices keep translated shaders: by default, the platform's per-user cache
@@ -406,6 +413,7 @@ impl std::fmt::Debug for DeviceOptions {
             withheld_extensions,
             messages,
             loader,
+            get_instance_proc_addr,
             kinds,
             shader_cache,
             withhold_generated_commands,
@@ -439,6 +447,10 @@ impl std::fmt::Debug for DeviceOptions {
             .field("withheld_extensions", withheld_extensions)
             .field("messages", messages)
             .field("loader", loader)
+            .field(
+                "get_instance_proc_addr",
+                &get_instance_proc_addr.map(|f| f as usize),
+            )
             .field("kinds", kinds)
             .field("shader_cache", shader_cache)
             .field("withhold_generated_commands", withhold_generated_commands)
@@ -489,6 +501,7 @@ impl Default for DeviceOptions {
             withheld_extensions: Default::default(),
             messages: Default::default(),
             loader: Default::default(),
+            get_instance_proc_addr: None,
             kinds: Default::default(),
             shader_cache: Default::default(),
             withhold_generated_commands: Default::default(),
@@ -951,9 +964,22 @@ pub(super) unsafe fn new_instance(
     made
 }
 
+/// The loader whose `vkGetInstanceProcAddr` is `get_instance_proc_addr`.
+fn entry_from_proc_addr(get_instance_proc_addr: ash::vk::PFN_vkGetInstanceProcAddr) -> ash::Entry {
+    let static_fn = ash::StaticFn {
+        get_instance_proc_addr,
+    };
+    // SAFETY: `DeviceOptions::get_instance_proc_addr` is a loader's, held loaded by the caller.
+    unsafe { ash::Entry::from_static_fn(static_fn) }
+}
+
 /// The instance of `options`.
 fn create_instance(options: &DeviceOptions) -> Result<Arc<InstanceShared>, Error> {
-    instance_of(open_loader(options.loader.as_deref())?, options)
+    let entry = match options.get_instance_proc_addr {
+        Some(get_instance_proc_addr) => entry_from_proc_addr(get_instance_proc_addr),
+        None => open_loader(options.loader.as_deref())?,
+    };
+    instance_of(entry, options)
 }
 
 /// The instance of `options` from the loader `entry`, which lists its instance extensions once
@@ -2725,6 +2751,7 @@ fn same_options(a: &DeviceOptions, b: &DeviceOptions) -> bool {
         withheld_extensions,
         messages: _,
         loader,
+        get_instance_proc_addr,
         kinds,
         shader_cache,
         withhold_generated_commands,
@@ -2756,6 +2783,8 @@ fn same_options(a: &DeviceOptions, b: &DeviceOptions) -> bool {
         && *withheld_features == b.withheld_features
         && *withheld_extensions == b.withheld_extensions
         && *loader == b.loader
+        && get_instance_proc_addr.map(|f| f as usize)
+            == b.get_instance_proc_addr.map(|f| f as usize)
         && *kinds == b.kinds
         && *shader_cache == b.shader_cache
         && *withhold_generated_commands == b.withhold_generated_commands

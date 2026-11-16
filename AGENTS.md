@@ -58,6 +58,8 @@ These override anything below.
    ledger, not a journal). A commit that adds, removes or changes such a choice, its bound or its
    switch updates its row in the same commit; `tests::fast_paths` checks the ledger against the
    code.
+   One switch here is a deliberate exception, outside `exact_answers()`:
+   `HalfRoundingPolicy::Exact`. Read `FORK.md` before changing it.
 2. **An accuracy note is logged, never fatal.** A precision note or degradation is recorded and
    announced, and the work runs, on every device. Only what Metal itself refuses, or an operation
    that cannot run at all, may fail or end anything.

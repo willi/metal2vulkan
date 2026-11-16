@@ -46,7 +46,8 @@ ash = { version = "0.38", default-features = false, features = ["std"] }
 
 - Rust 1.98 or newer.
 - Nothing links against Vulkan at build time. The runtime opens the Vulkan loader when it makes a
-  device, or takes the consumer's `vkGetInstanceProcAddr` when it adopts one. A device needs
+  device (or uses `DeviceOptions::get_instance_proc_addr`, a loader entry point the consumer
+  resolved), or takes the consumer's `vkGetInstanceProcAddr` when it adopts one. A device needs
   Vulkan 1.2 and `timelineSemaphore`.
 - A program that makes a `VkInstance` of its own beside a runtime device calls
   `program_instance_made()` right after it. A layer registers an exit handler as an instance is
@@ -178,6 +179,7 @@ Vulkan-side choices Metal has no counterpart for:
 | `policy` | The translator's `DevicePolicy` ([docs/API.md](../../docs/API.md#the-policy)): containment, and the fast or exact form of each accuracy choice ([FAST-PATHS](../../docs/FAST-PATHS.md)). |
 | `kinds` | Which `DeviceKind`s qualify; empty admits every kind. |
 | `loader` | A Vulkan loader library to open instead of the default ones (the platform's loader by name, then on macOS `$VULKAN_SDK/lib`, `/opt/homebrew/lib` and `/usr/local/lib`). If none opens, `Error::LoaderNotFound` lists each path tried. |
+| `get_instance_proc_addr` | A loader's `vkGetInstanceProcAddr` the consumer already resolved: the runtime makes its instance through it and opens no library (`loader` is then ignored). The consumer keeps that library loaded. |
 | `layers`, `layer_settings` | Instance layers, in order, and their settings. |
 | `instance_extensions`, `device_extensions` | Extensions beyond those the runtime enables (a swapchain, for example). |
 | `optional_device_extensions` | Device extensions each device enables only where it can (it lists one, the instance has what it requires, and the device has its features), never refused for one; `Device::enables_extension` says which. A listed extension's feature structure is enabled with it where the runtime knows one (`VK_KHR_video_maintenance1` and `2`'s, `VK_KHR_unified_image_layouts`' with `unifiedImageLayoutsVideo` where the device has it), here and for `device_extensions`. |

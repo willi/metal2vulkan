@@ -1513,6 +1513,7 @@ enum	metal2vulkan::device::FormatUsage	#[derive(Clone, Copy, Debug, PartialEq, E
 enum	metal2vulkan::device::FunctionStorage	#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)] #[non_exhaustive] pub enum FunctionStorage
 enum	metal2vulkan::device::GuestIsolation	#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))] #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)] #[non_exhaustive] pub enum GuestIsolation
 enum	metal2vulkan::device::HalfChainPolicy	#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))] #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)] #[non_exhaustive] pub enum HalfChainPolicy
+enum	metal2vulkan::device::HalfRoundingPolicy	#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))] #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)] #[non_exhaustive] pub enum HalfRoundingPolicy
 enum	metal2vulkan::device::HandleDomain	#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))] #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)] #[non_exhaustive] pub enum HandleDomain
 enum	metal2vulkan::device::HeapAnswerPolicy	#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))] #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)] #[non_exhaustive] pub enum HeapAnswerPolicy
 enum	metal2vulkan::device::HeapCompressionPolicy	#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))] #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)] #[non_exhaustive] pub enum HeapCompressionPolicy
@@ -2179,6 +2180,7 @@ field	metal2vulkan-runtime::DeviceOptions.device_extensions	pub device_extension
 field	metal2vulkan-runtime::DeviceOptions.encoder_trail	pub encoder_trail: bool
 field	metal2vulkan-runtime::DeviceOptions.extra_queues	pub extra_queues: Vec<vk::QueueFlags>
 field	metal2vulkan-runtime::DeviceOptions.fail_in_place_check	pub fail_in_place_check: bool
+field	metal2vulkan-runtime::DeviceOptions.get_instance_proc_addr	pub get_instance_proc_addr: Option<ash::vk::PFN_vkGetInstanceProcAddr>
 field	metal2vulkan-runtime::DeviceOptions.gpu_times_from_host	pub gpu_times_from_host: bool
 field	metal2vulkan-runtime::DeviceOptions.instance_api_version	pub instance_api_version: Option<ApiVersion>
 field	metal2vulkan-runtime::DeviceOptions.instance_extensions	pub instance_extensions: Vec<CString>
@@ -4538,6 +4540,7 @@ field	metal2vulkan::device::DevicePolicy.containment	pub containment: Containmen
 field	metal2vulkan::device::DevicePolicy.dont_care_colors	pub dont_care_colors: DontCareColorPolicy
 field	metal2vulkan::device::DevicePolicy.extended_range_blits	pub extended_range_blits: ExtendedRangeBlitPolicy
 field	metal2vulkan::device::DevicePolicy.half_chains	pub half_chains: HalfChainPolicy
+field	metal2vulkan::device::DevicePolicy.half_rounding	pub half_rounding: HalfRoundingPolicy
 field	metal2vulkan::device::DevicePolicy.handle_domain	pub handle_domain: HandleDomain
 field	metal2vulkan::device::DevicePolicy.heap_answers	pub heap_answers: HeapAnswerPolicy
 field	metal2vulkan::device::DevicePolicy.heap_compression	pub heap_compression: HeapCompressionPolicy
@@ -13827,6 +13830,8 @@ variant	metal2vulkan::device::GuestIsolation::Off	Off
 variant	metal2vulkan::device::GuestIsolation::On	On
 variant	metal2vulkan::device::HalfChainPolicy::AtExits	AtExits
 variant	metal2vulkan::device::HalfChainPolicy::EachOperation	EachOperation
+variant	metal2vulkan::device::HalfRoundingPolicy::Exact	Exact
+variant	metal2vulkan::device::HalfRoundingPolicy::Native	Native
 variant	metal2vulkan::device::HandleDomain::Table	Table
 variant	metal2vulkan::device::HeapAnswerPolicy::Device	Device
 variant	metal2vulkan::device::HeapAnswerPolicy::Metal	Metal

@@ -518,3 +518,48 @@ fn the_plain_arm_is_the_metal_sampler_routine_for_its_classes() {
         assert_eq!(texel_format(pf).plain_on_metal_sampler(), plain, "{pf:?}");
     }
 }
+
+/// Under Metal's rounding (`ModuleBuilder::exact_half`, `HalfRoundingPolicy::Exact`)
+/// [`half::ROUTINE_WORDS_EXACT`] bounds the routine's emission in every form, and
+/// [`half::CALL_WORDS`] a call's.
+#[test]
+fn the_half_texel_routine_words_bound_its_emission_under_exact() {
+    use crate::spirv::serialize::serialize;
+    let ins = [v4(), int(32)];
+    let size = |body: Body<'_>| -> usize {
+        let m = kernel(&ins, v4(), body).expect("build");
+        serialize(m).expect("serialize").words.len()
+    };
+    for q in FORMS {
+        let set = |fb: &mut FunctionBuilder<'_>| {
+            fb.module().set_quantize_form(q);
+            fb.module().set_exact_half(true);
+        };
+        let without = size(&|fb, x| {
+            set(fb);
+            Ok(x[0])
+        });
+        let defined = size(&|fb, x| {
+            set(fb);
+            half::define(fb.module())?;
+            Ok(x[0])
+        }) - without;
+        let lanes = body_lanes(TexelLanes::Filtered, q);
+        let called = size(&|fb, x| {
+            set(fb);
+            lanes(fb, x)
+        }) - without
+            - defined;
+        assert!(
+            defined as u64 <= half::ROUTINE_WORDS_EXACT,
+            "{q:?}: the routine is {defined} words, bound {}",
+            half::ROUTINE_WORDS_EXACT
+        );
+        assert!(
+            called <= half::CALL_WORDS as usize,
+            "{q:?}: a call is {called} words, bound {}",
+            half::CALL_WORDS
+        );
+        eprintln!("half texel routine under Exact {q:?}: {defined} words, a call {called}");
+    }
+}

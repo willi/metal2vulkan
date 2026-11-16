@@ -5,6 +5,7 @@
 //! field, a policy value or a precision note added to the crate fails to compile here until it is
 //! classed, and so reaches the ledger.
 
+use crate::device::HalfRoundingPolicy;
 use crate::device::{
     BatchOrderPolicy, CompletionPolicy, DevicePolicy, DontCareColorPolicy, ExtendedRangeBlitPolicy,
     HalfChainPolicy, HeapAnswerPolicy, HeapCompressionPolicy, HostPageTexturePolicy,
@@ -96,6 +97,8 @@ fn choices() -> Vec<Choice> {
         // The translator's: how a `half` chain rounds without `shaderFloat16`, and how planes of a
         // two-plane YCbCr texture read in place are sampled.
         half_chains: _,
+        // The translator's too: how a `half` result rounds.
+        half_rounding: _,
         ycbcr_in_place_reads: _,
     } = p;
     vec![
@@ -106,6 +109,7 @@ fn choices() -> Vec<Choice> {
         choice!(p.render_lowering: RenderLoweringPolicy { AtCall, Worker }),
         choice!(p.host_page_textures: HostPageTexturePolicy { InPlace, Shadow }),
         choice!(p.half_chains: HalfChainPolicy { AtExits, EachOperation }),
+        choice!(p.half_rounding: HalfRoundingPolicy { Native, Exact }),
         choice!(p.ycbcr_in_place_reads: YCbCrInPlacePolicy { Model, Exact }),
         choice!(p.pipeline_waits: PipelineWaitPolicy { Bounded, Exact }),
         choice!(p.wide_lines: WideLinePolicy { Device, Exact }),

@@ -109,7 +109,7 @@ impl Device {
             ));
         }
         let fields = derive_fields(&desc, &policy, &deviations);
-        let profile = DeviceProfile::of(fields);
+        let profile = DeviceProfile::of(fields, policy.half_rounding);
         let metal = MetalDeviceProperties::derive(&profile, &desc.allocation);
         Ok(Device(Arc::new(DeviceInner {
             fingerprint: profile.fingerprint(),

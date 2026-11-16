@@ -16,6 +16,9 @@
 //!
 //! Under `HalfChainPolicy::EachOperation`, and on a device with `shaderFloat16` under either value,
 //! nothing is marked.
+//!
+//! Nor under `HalfRoundingPolicy::Exact` ([`super::narrow::exact_rounding`]), whose every rounding
+//! is Metal's, so each operation rounds once as its AIR does.
 
 use std::collections::BTreeSet;
 
@@ -29,10 +32,12 @@ use crate::spirv::builder::QuantizeForm;
 /// The `half` additions, subtractions and products of `cx`'s body held at `float` precision: on a
 /// profile without `shaderFloat16` under `HalfChainPolicy::AtExits`, each whose flags hold
 /// `contract` and `reassoc` and whose every use is such an operation; none elsewhere.
+/// None under `HalfRoundingPolicy::Exact` either ([`super::narrow::exact_rounding`]).
 pub fn plan(cx: &SelectCx<'_>, m: &mut Meter) -> Result<BTreeSet<InstId>, Error> {
     let fields = cx.profile.fields();
     if fields.half_chains != HalfChainPolicy::AtExits
         || super::narrow::quantize_form(cx.profile) != QuantizeForm::Device
+        || super::narrow::exact_rounding(cx.profile, QuantizeForm::Device)
     {
         return Ok(BTreeSet::new());
     }
