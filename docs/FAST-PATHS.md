@@ -69,6 +69,16 @@ validation and conformance runs under `exact_answers()` expect the device's roun
 |---|---|---|---|---|
 | A `half` result computed in `float` (every `half` operation but the device's 16-bit instructions, and a conversion of a `float` to `half`) and a `half` texel, rounded to `half` by the device's own rounding: its `OpQuantizeToF16` without `shaderFloat16`, else its conversion to 16 bits and back (`lower::arith::narrow::round`). Where the profile rounds through that conversion under the 16-bit float controls, which make it Metal's by the Vulkan spec, on a driver that does not fuse arithmetic into it, both values emit the same module. | `half_rounding = HalfRoundingPolicy::Native` | `half_rounding = HalfRoundingPolicy::Exact`: integer arithmetic on the `float`'s bits, Metal's `half(float)` on every device (to nearest even, half denormals kept, an infinity from 65520 up, `0x7E00` for a NaN); a `half` texel keeps the NaN the device decoded (a texel class whose Metal `half` is not its value's rounding reads as under the default), and a fast-math `half` chain rounds at each operation whatever `half_chains` holds. A `half` read from or written to its bits stays the device's widening or narrowing | The quantize may answer a zero below the smallest normal half, where Metal answers the half denormal; the conversion's rounding, and a driver's fusing of arithmetic into it, are the device's. `NativeHalfQuantize` (`native-half-quantize`), `NativeHalfConversion` (`native-half-conversion`) | Not timed. About twenty instructions a rounding against the device's one or two |
 
+## The watchdog's bound, by policy
+
+`DevicePolicy::watchdog` is no speed choice and changes no answer of Metal's, so it is in no table.
+It bounds how long a queue's front batch may go without its timeline advancing before the runtime
+fails it as Metal's timed-out command buffer. The default is Metal's largest measured bound,
+20.2 s, as the known gaps below state. A policy of no bound (`None`) fails no batch for its time:
+only a probe that goes unanswered still finds a stop, so on a device without a staging queue
+(lavapipe) a command buffer that waits on what is never signalled holds its queue until the
+process ends, where Metal fails it from about 5 s. `FORK.md` records why this tree has it.
+
 ## Not speed choices: device gaps
 
 No switch gives Metal's answer here: the device lacks what an exact form needs, or no exact form is

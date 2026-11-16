@@ -77,6 +77,13 @@ pub(super) const PROBE: Duration = Duration::from_secs(2);
 /// Metal's timed-out command buffer (the module docs): the largest of Metal's measured bounds.
 pub(super) const WATCHDOG: Duration = Duration::from_millis(20_200);
 
+// The default policy's `watchdog` is this bound (FORK.md): a change to it stops the build until
+// `DevicePolicy::UNTRUSTED` takes it.
+const _: () = assert!(matches!(
+    metal2vulkan::device::DevicePolicy::UNTRUSTED.watchdog,
+    Some(bound) if bound.as_nanos() == WATCHDOG.as_nanos()
+));
+
 /// How long one look of a probe waits for its answer.
 const LOOK: Duration = Duration::from_millis(100);
 
@@ -180,15 +187,15 @@ pub(super) fn stall_after(device: &Device) -> Duration {
     STALL
 }
 
-/// How long a queue's front may go without its timeline advancing on `device`: [`WATCHDOG`], or
-/// what a device test set (`device/line.rs`'s hooks).
-pub(super) fn watchdog_after(device: &Device) -> Duration {
+/// How long a queue's front may go without its timeline advancing on `device`: its policy's
+/// `watchdog` ([`WATCHDOG`] by default; `None`, no bound), or what a device test set
+/// (`device/line.rs`'s hooks).
+pub(super) fn watchdog_after(device: &Device) -> Option<Duration> {
     #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
     if let Some(after) = *crate::device::lock(&device.line().hooks.watchdog_after) {
-        return after;
+        return Some(after);
     }
-    let _ = device;
-    WATCHDOG
+    device.compile_device().policy().watchdog
 }
 
 /// Say that the front batch of `device`'s `VkQueue` `queue` went `held` without its timeline
