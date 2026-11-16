@@ -18,9 +18,6 @@
 //!   parked, and a command buffer runs after it. So it does where the front batch is not its
 //!   command buffer's last, the last held by the scheduler, and one committed behind it fails as
 //!   its victim (`GpuRecoveryVictim`).
-//! - The bound is the policy's (`DevicePolicy::watchdog`): under the default policy, with no hook
-//!   in its place, a front fails no sooner than its 20.2 s; under a policy of none (`None`), a front
-//!   held past that completes once its wait is signalled, with no timeout and no recovery.
 //!
 //! A device test: compiled only under the validation crate's GPU safety cfgs, on the kind of device
 //! the cfg selects (docs/VALIDATION.md). No GPU fault and no spin: the stuck work is a semaphore
@@ -46,7 +43,7 @@ const STALL: Duration = Duration::from_millis(200);
 /// The longest a test waits for the stall's answer: the bound, the probe's 2 s, and room.
 const WAIT: Duration = Duration::from_secs(20);
 
-/// The watchdog's bound in the test of it, in place of the policy's `watchdog`.
+/// The watchdog's bound in the test of it, in place of `stall::WATCHDOG`.
 const WATCHDOG: Duration = Duration::from_secs(1);
 
 /// The watchdog's bound in the test whose front advances: past the second or so it holds the
@@ -68,20 +65,8 @@ fn device(
     unanswered: bool,
     watchdog: Option<Duration>,
 ) -> Device {
-    let policy = DeviceOptions::default().policy.watchdog;
-    device_with(cache, heard, unanswered, watchdog, policy)
-}
-
-/// [`device`], its policy's watchdog bound `policy_watchdog` (`None`: no bound).
-fn device_with(
-    cache: &Path,
-    heard: &Arc<Mutex<Heard>>,
-    unanswered: bool,
-    watchdog: Option<Duration>,
-    policy_watchdog: Option<Duration>,
-) -> Device {
     let heard = Arc::clone(heard);
-    let mut options = DeviceOptions {
+    let options = DeviceOptions {
         kinds: match cfg!(m2v_cpu_icd) {
             true => vec![DeviceKind::Cpu],
             false => vec![
@@ -103,7 +88,6 @@ fn device_with(
         })),
         ..DeviceOptions::default()
     };
-    options.policy.watchdog = policy_watchdog;
     let device = Device::system_default_with(&options).unwrap();
     let hooks = &device.line().hooks;
     *crate::device::lock(&hooks.stall_after) = Some(STALL);
@@ -428,106 +412,6 @@ fn a_front_past_the_watchdog_fails_as_metals_timeout() {
     unsafe { parked.signal_semaphore(&info) }.unwrap();
 }
 
-/// The default policy's watchdog bound, Metal's largest measured one.
-fn default_bound() -> Duration {
-    DeviceOptions::default()
-        .policy
-        .watchdog
-        .expect("the default policy has a watchdog")
-}
-
-/// Under the default policy, with no test's bound in its place, a front that does not advance
-/// fails as Metal's timed-out command buffer (`GpuHang`) no sooner than the default bound, and
-/// the generation stops.
-#[test]
-fn the_default_policy_s_watchdog_fails_a_front_at_its_bound() {
-    let bound = default_bound();
-    let scratch = Scratch::new();
-    let heard = Arc::new(Mutex::new(Heard::default()));
-    let device = device(&scratch.0, &heard, false, None);
-    // SAFETY: the functions of the generation that stops, used only to signal the event's
-    // semaphore below, on the parked `VkDevice`, which is never destroyed.
-    let parked = unsafe { device.raw() }.device.clone();
-    let event = device.new_event().unwrap();
-    // SAFETY: the stopping generation's semaphore of the event, signalled once from the host to
-    // the reserved counter below.
-    let semaphore = unsafe { event.vk_semaphore() };
-    let buffer = device.new_buffer(4096, ResourceOptions::shared()).unwrap();
-    let began = Instant::now();
-    let (command_buffer, counter) = stuck(&device, &event, &buffer);
-    assert!(
-        command_buffer
-            .wait_until_completed_for(bound + WAIT)
-            .is_ok(),
-        "the stuck command buffer did not fail in {:?}",
-        bound + WAIT
-    );
-    let failed = began.elapsed();
-    let counts = device.work_counts();
-    eprintln!(
-        "STALL-WATCHDOG-DEFAULT {}: failed after {failed:?}, the bound {bound:?}; watchdog timeouts {}",
-        device.name(),
-        counts.watchdog_timeouts,
-    );
-    assert_eq!(
-        (command_buffer.status(), command_buffer.error()),
-        (
-            CommandBufferStatus::Error,
-            Some(CommandBufferError::GpuHang)
-        )
-    );
-    assert!(failed >= bound, "failed after {failed:?}, before the bound");
-    assert_eq!(counts.watchdog_timeouts, 1);
-    let info = vk::SemaphoreSignalInfo::default()
-        .semaphore(semaphore)
-        .value(counter);
-    // SAFETY: the parked `VkDevice` and its semaphore, both live (never destroyed); the counter
-    // the reservation named, which nothing before it waits for.
-    unsafe { parked.signal_semaphore(&info) }.unwrap();
-}
-
-/// A policy of no watchdog (`None`) fails no front for its time: one held past the default
-/// policy's bound completes once the host signals what it waits for, with no timeout and no
-/// recovery.
-#[test]
-fn a_policy_of_no_watchdog_fails_no_front() {
-    let held = default_bound() + Duration::from_secs(1);
-    let scratch = Scratch::new();
-    let heard = Arc::new(Mutex::new(Heard::default()));
-    let device = device_with(&scratch.0, &heard, false, None, None);
-    let event = device.new_event().unwrap();
-    let buffer = device.new_buffer(4096, ResourceOptions::shared()).unwrap();
-    let (command_buffer, counter) = stuck(&device, &event, &buffer);
-    assert!(
-        command_buffer.wait_until_completed_for(held).is_err(),
-        "the held command buffer ended in {held:?}, before its wait was signalled"
-    );
-    // SAFETY: the event's semaphore, signalled once from the host to the reserved counter, which
-    // nothing before it waits for.
-    let semaphore = unsafe { event.vk_semaphore() };
-    let info = vk::SemaphoreSignalInfo::default()
-        .semaphore(semaphore)
-        .value(counter);
-    // SAFETY: as above; the device is live.
-    unsafe { device.shared().vk().signal_semaphore(&info) }.unwrap();
-    assert!(command_buffer.wait_until_completed_for(WAIT).is_ok());
-    let counts = device.work_counts();
-    eprintln!(
-        "STALL-NO-WATCHDOG {}: held {held:?}; watchdog timeouts {}, wedges {}, recoveries {}",
-        device.name(),
-        counts.watchdog_timeouts,
-        counts.wedges_declared,
-        counts.device_recoveries,
-    );
-    assert_eq!(
-        (command_buffer.status(), command_buffer.error()),
-        (CommandBufferStatus::Completed, None)
-    );
-    assert_eq!(counts.watchdog_timeouts, 0);
-    assert_eq!(counts.wedges_declared, 0);
-    assert_eq!(counts.device_recoveries, 0);
-}
-
 /// The command buffer whose front batch goes past the watchdog's bound fails as the hang
 /// (`GpuHang`) when that batch is not its last: its later batch waits for a plain event's value
 /// nothing signals, so the scheduler holds it, and fails it with the loss
@@ -680,3 +564,6 @@ fn the_encoder_trail_names_the_stuck_encoder_and_the_last_one_completed() {
     assert!(line.contains("; the device's pipeline pool: "), "{line}");
     assert!(submitted >= 2, "{submitted} submissions for 2 encoders");
 }
+
+/// The bound as a device policy, this tree's own (FORK.md).
+mod watchdog_policy;

@@ -105,11 +105,19 @@ pub struct DevicePolicy {
     pub pipeline_commit_wait: Duration,
     /// How long a queue's front batch may go without its timeline advancing before it fails as
     /// Metal's timed-out command buffer (`GpuHang`) and its generation stops and is recovered from
-    /// (the runtime's `command_buffer/stall.rs`): 20.2 s by default, the largest of Metal's
-    /// measured bounds, so no work that Metal completes on any of the GPUs measured fails. `None`
-    /// fails no batch for its time, for a device far slower than any Mac's GPU (a CPU rasterizer
-    /// under load): its slow work completes late, and a stop whose probe is answered is never
-    /// found. The runtime's alone: no emitted code changes.
+    /// (the runtime's `command_buffer/stall.rs`). The default is that file's `WATCHDOG`, 20.2 s,
+    /// the largest of Metal's measured bounds, so no work that Metal completes on any of the GPUs
+    /// measured fails. It is checked once per waiter's 100 ms slice, so it fires up to a slice
+    /// late.
+    ///
+    /// `None` is no bound, for a device far slower than any Mac's GPU (a CPU rasterizer under
+    /// load), whose slow work then completes late. Only a probe that goes unanswered still finds a
+    /// stop, and a device without a staging queue (lavapipe) sends none: there a command buffer
+    /// that waits on what is never signalled holds its queue, and every later batch on it, until
+    /// the process ends, where Metal fails it from about 5 s. A serialized policy without the field
+    /// reads as the default. The runtime's alone: no emitted code changes. This tree's own
+    /// (`FORK.md`).
+    #[cfg_attr(feature = "serde", serde(default = "default_watchdog"))]
     pub watchdog: Option<Duration>,
     /// Whether a line Apple's `setLineWidth:` widens, at a width the device's own lines draw (which
     /// no device's are taken to draw as Metal's: strict lines, lines that are not parallelograms, a
@@ -283,6 +291,12 @@ impl Default for DevicePolicy {
     fn default() -> DevicePolicy {
         DevicePolicy::UNTRUSTED
     }
+}
+
+/// The default policy's `watchdog`, for a serialized policy written before the field.
+#[cfg(feature = "serde")]
+fn default_watchdog() -> Option<Duration> {
+    DevicePolicy::UNTRUSTED.watchdog
 }
 
 /// The containment choice. The encoding (robustness or in-shader checks) is selected by

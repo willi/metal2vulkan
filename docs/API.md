@@ -4059,9 +4059,8 @@ bound.
   command buffers in flight took past 10 seconds to fail, and where its new `VkDevice` could not
   be made, after which the device answers as a lost one. A `VkDevice` whose work stopped with no
   loss from the driver (no work of it advanced for 10 seconds with some pending, and a probe on
-  the staging queue did not complete in 2 seconds; or a queue's front batch went the policy's
-  `watchdog`, 20.2 seconds by default (the largest of Metal's measured watchdog bounds; `None`
-  sets none), without its timeline advancing, whatever the
+  the staging queue did not complete in 2 seconds; or a queue's front batch went 20.2 seconds,
+  the largest of Metal's measured watchdog bounds, without its timeline advancing, whatever the
   probe answered, its command buffer failing as Metal's timed-out one, `GpuHang`;
   `command_buffer/stall.rs`) is recovered from the same way, and the reason says it stopped, by
   which of the two, and was parked: never destroyed, its queues never waited for

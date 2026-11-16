@@ -60,6 +60,9 @@ fn choices() -> Vec<Choice> {
         handle_domain: _,
         containment: _,
         isolation: _,
+        // The runtime's, and no answer of Metal's either: how long a queue's front batch may go
+        // without its timeline advancing before it fails as Metal's timed-out command buffer.
+        watchdog: _,
         // The accuracy choices, below.
         // The runtime's: a heap's compressed texture's image, what a heap texture's size query
         // answers where its image needs more than Metal's answer, when the host sees a command buffer
@@ -94,9 +97,6 @@ fn choices() -> Vec<Choice> {
         rate_map_regions: _,
         managed_copy_in: _,
         indirect_records: _,
-        // The runtime's, and no accuracy choice: how long a queue's front batch may go without
-        // its timeline advancing before it fails as Metal's timed-out command buffer.
-        watchdog: _,
         // The translator's: how a `half` chain rounds without `shaderFloat16`, and how planes of a
         // two-plane YCbCr texture read in place are sampled.
         half_chains: _,
@@ -912,4 +912,35 @@ fn exact_answers_read_planes_in_place_as_metal() {
         DevicePolicy::UNTRUSTED.exact_answers().ycbcr_in_place_reads,
         YCbCrInPlacePolicy::Exact
     );
+}
+
+/// The runtime's watchdog bound (`watchdog`, this tree's own: FORK.md) moves no committed profile's
+/// fingerprint, so a device with no bound shares its keys with a default one.
+#[test]
+fn the_runtime_s_watchdog_keys_no_profile() {
+    use crate::spirv::testing::committed_profiles_with;
+    let bounded = committed_profiles_with(DevicePolicy::UNTRUSTED).expect("profiles");
+    let mut policy = DevicePolicy::UNTRUSTED;
+    policy.watchdog = None;
+    let unbounded = committed_profiles_with(policy).expect("profiles");
+    assert_eq!(bounded.len(), unbounded.len());
+    for ((stem, b), (other, u)) in bounded.iter().zip(&unbounded) {
+        assert_eq!(stem, other);
+        assert_eq!(b.fingerprint(), u.fingerprint(), "{stem}");
+    }
+}
+
+/// A serialized policy written before `watchdog` existed reads with the default's bound, not with
+/// none; a policy that names no bound keeps none.
+#[cfg(feature = "serde")]
+#[test]
+fn a_policy_serialized_without_the_watchdog_keeps_the_default_bound() {
+    let mut written = serde_json::to_value(DevicePolicy::UNTRUSTED).unwrap();
+    let fields = written.as_object_mut().unwrap();
+    assert!(fields.remove("watchdog").is_some());
+    let read: DevicePolicy = serde_json::from_value(written.clone()).unwrap();
+    assert_eq!(read.watchdog, DevicePolicy::UNTRUSTED.watchdog);
+    written["watchdog"] = serde_json::Value::Null;
+    let read: DevicePolicy = serde_json::from_value(written).unwrap();
+    assert_eq!(read.watchdog, None);
 }
