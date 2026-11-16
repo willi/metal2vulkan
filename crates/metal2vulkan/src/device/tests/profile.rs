@@ -323,6 +323,8 @@ fn fingerprint_covers_every_policy_field() {
     variants.push(("isolation", p));
     p.containment = ContainmentPolicy::UnsafeOff;
     variants.push(("containment", p));
+    p.half_rounding = crate::device::HalfRoundingPolicy::Exact;
+    variants.push(("half_rounding", p));
     let mut seen = vec![reference];
     for (name, p) in variants {
         let h = fp(p);

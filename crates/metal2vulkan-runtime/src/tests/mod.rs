@@ -290,6 +290,8 @@ mod grid_widths;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
 mod group_resolve_apart;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod half_rounding;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
 mod hand_out_waits;
 #[cfg(unix)]
 mod handed_descriptor;

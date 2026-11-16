@@ -7,10 +7,10 @@
 
 use crate::device::{
     BatchOrderPolicy, CompletionPolicy, DevicePolicy, DontCareColorPolicy, ExtendedRangeBlitPolicy,
-    HalfChainPolicy, HeapAnswerPolicy, HeapCompressionPolicy, HostPageTexturePolicy,
-    IndirectRecordsPolicy, ManagedCopyInPolicy, PipelineWaitPolicy, QueueSharingPolicy,
-    RateMapRegionPolicy, RenderLoweringPolicy, UnsharedIsolationPolicy, UnstoredDontCarePolicy,
-    VertexReachPolicy, WideLinePolicy, YCbCrInPlacePolicy,
+    HalfChainPolicy, HalfRoundingPolicy, HeapAnswerPolicy, HeapCompressionPolicy,
+    HostPageTexturePolicy, IndirectRecordsPolicy, ManagedCopyInPolicy, PipelineWaitPolicy,
+    QueueSharingPolicy, RateMapRegionPolicy, RenderLoweringPolicy, UnsharedIsolationPolicy,
+    UnstoredDontCarePolicy, VertexReachPolicy, WideLinePolicy, YCbCrInPlacePolicy,
 };
 use crate::pipeline::PrecisionNote;
 use std::collections::BTreeSet;
@@ -93,9 +93,10 @@ fn choices() -> Vec<Choice> {
         rate_map_regions: _,
         managed_copy_in: _,
         indirect_records: _,
-        // The translator's: how a `half` chain rounds without `shaderFloat16`, and how planes of a
-        // two-plane YCbCr texture read in place are sampled.
+        // The translator's: how a `half` chain rounds without `shaderFloat16`, how a `half` result
+        // rounds, and how planes of a two-plane YCbCr texture read in place are sampled.
         half_chains: _,
+        half_rounding: _,
         ycbcr_in_place_reads: _,
     } = p;
     vec![
@@ -106,6 +107,7 @@ fn choices() -> Vec<Choice> {
         choice!(p.render_lowering: RenderLoweringPolicy { AtCall, Worker }),
         choice!(p.host_page_textures: HostPageTexturePolicy { InPlace, Shadow }),
         choice!(p.half_chains: HalfChainPolicy { AtExits, EachOperation }),
+        choice!(p.half_rounding: HalfRoundingPolicy { Native, Exact }),
         choice!(p.ycbcr_in_place_reads: YCbCrInPlacePolicy { Model, Exact }),
         choice!(p.pipeline_waits: PipelineWaitPolicy { Bounded, Exact }),
         choice!(p.wide_lines: WideLinePolicy { Device, Exact }),

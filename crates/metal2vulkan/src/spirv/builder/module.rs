@@ -183,6 +183,9 @@ pub struct ModuleBuilder {
     /// Whether the module computes `half` under the 16-bit float controls
     /// ([`ModuleBuilder::half_controls`]).
     half_controls: bool,
+    /// Whether a `half` rounding is Metal's integer rounding whatever the form
+    /// ([`ModuleBuilder::exact_half`]).
+    exact_half: bool,
 }
 
 /// How a float multiply the device must round on its own and never fuse is emitted
@@ -365,6 +368,19 @@ impl ModuleBuilder {
     /// ([`ModuleBuilder::set_native_half_nans`]).
     pub fn native_half_nans(&self) -> bool {
         self.native_half_nans
+    }
+
+    /// Round an `f32` to `half` by Metal's integer rounding (`lower::arith::narrow::round`,
+    /// `HalfRoundingPolicy::Exact`) instead of the [`ModuleBuilder::quantize_form`]'s, which still
+    /// decides how the module holds `half` values and moves their bits. Emission sets it with the
+    /// form; a builder that never sets it rounds in its form.
+    pub fn set_exact_half(&mut self, exact: bool) {
+        self.exact_half = exact;
+    }
+
+    /// Whether a `half` rounding is Metal's integer rounding ([`ModuleBuilder::set_exact_half`]).
+    pub fn exact_half(&self) -> bool {
+        self.exact_half
     }
 
     /// Set whether the module computes `half` under the 16-bit float controls

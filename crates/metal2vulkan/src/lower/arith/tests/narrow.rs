@@ -2497,3 +2497,77 @@ fn a_half_nan_constant_widens_with_its_bits() {
         assert_eq!(FloatFmt::Half.narrow_bits(w), b, "{b:#06x}");
     }
 }
+
+/// Under Metal's rounding (`ModuleBuilder::exact_half`, `HalfRoundingPolicy::Exact`), in every
+/// quantize form, `round` and `round_measured` are Metal's conversion of a `float` to `half`
+/// ([`metal_half`]) bit for bit over [`metal_half_operands`] (half denormals, signed zeros, the
+/// 65520 edge and NaNs included, which the interpreter's quantize and conversion do not all
+/// answer), on scalars and vectors, with no `OpQuantizeToF16` and no conversion pair in the
+/// module. The rounded value is stored as the `f32` it is held in, so a NaN is Metal's `0x7E00`
+/// widened. `round_texel` is too but for a NaN, which is the texel's own bits.
+#[test]
+fn integer_half_rounding_is_metals_conversion() {
+    use crate::spirv::builder::QuantizeForm;
+    let xs = metal_half_operands();
+    let (f32f, h) = (float(32), half());
+    let v = vec(h, 3);
+    let held = |b: u64| match metal_half(b) {
+        0x7E00 => 0x7FC0_0000,
+        h => u64::from((f16_to_f64(h as u16) as f32).to_bits()),
+    };
+    let texel = |b: u64| match b & 0x7FFF_FFFF > 0x7F80_0000 {
+        true => b,
+        false => held(b),
+    };
+    type Round = fn(&mut FunctionBuilder<'_>, Form, Value) -> BResult<Value>;
+    let rounds: [(&str, Round, &dyn Fn(u64) -> u64); 3] = [
+        ("round", crate::lower::arith::narrow::round, &held),
+        (
+            "round_measured",
+            crate::lower::arith::narrow::round_measured,
+            &held,
+        ),
+        (
+            "round_texel",
+            crate::lower::arith::narrow::round_texel,
+            &texel,
+        ),
+    ];
+    let cases: Vec<Case> = xs.iter().map(|b| vec![vec![u64::from(*b)]]).collect();
+    let vc: Vec<Case> = xs
+        .chunks(3)
+        .step_by(5)
+        .filter(|c| c.len() == 3)
+        .map(|c| vec![c.iter().map(|b| u64::from(*b)).collect()])
+        .collect();
+    for form in [
+        QuantizeForm::Device,
+        QuantizeForm::Converted,
+        QuantizeForm::Controlled,
+    ] {
+        for (name, round, want) in rounds {
+            for (lanes, input, cs) in [(h, f32f, &cases), (v, vec(f32f, 3), &vc)] {
+                let body = |fb: &mut FunctionBuilder<'_>, x: &[Value]| {
+                    fb.module().set_quantize_form(form);
+                    fb.module().set_exact_half(true);
+                    round(fb, lanes, x[0])
+                };
+                let what = format!("exact {name} in {form:?} on {lanes:?}");
+                let m = kernel_with(&[input], input, &body, true, false)
+                    .unwrap_or_else(|e| panic!("{what}: build: {e:?}"));
+                assert!(
+                    !crate::lower::arith::narrow::quantizes(&m),
+                    "{what}: OpQuantizeToF16"
+                );
+                let mut meter = crate::budget::Meter::new(&crate::budget::Budget::default());
+                assert!(
+                    !crate::lower::arith::narrow::rounds_by_conversion(&m, &mut meter)
+                        .expect("scan"),
+                    "{what}: a conversion pair"
+                );
+                let reference = |c: &Case| Some(c[0].iter().map(|b| want(*b)).collect());
+                check_module(&what, m, &[input], input, cs, &reference, &|g, w| g == w);
+            }
+        }
+    }
+}

@@ -500,6 +500,8 @@ pub struct ProfileFields {
     pub isolation: GuestIsolation,
     /// How a fast-math `half` chain rounds without `shaderFloat16` (`DevicePolicy::half_chains`).
     pub half_chains: crate::device::HalfChainPolicy,
+    /// Whose rounding a `half` result computed in `float` takes (`DevicePolicy::half_rounding`).
+    pub half_rounding: crate::device::HalfRoundingPolicy,
     pub leaf: LeafCaps,
     pub subgroup: SubgroupModel,
     pub images: ImageCaps,

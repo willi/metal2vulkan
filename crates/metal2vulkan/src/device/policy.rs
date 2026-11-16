@@ -71,6 +71,10 @@ pub struct DevicePolicy {
     /// without `shaderFloat16`, rounds where a value leaves it (the default) or at each operation.
     /// Changes emitted code: the profile carries it.
     pub half_chains: HalfChainPolicy,
+    /// Whether a `half` result computed in `float`, and a `half` texel, rounds to `half` by the
+    /// device's own rounding (the default) or by integer arithmetic, Metal's on every device.
+    /// Changes emitted code: the profile carries it.
+    pub half_rounding: HalfRoundingPolicy,
     /// Whether a function that reads a two-plane YCbCr texture's planes in place (a uniform
     /// texel buffer over their codes, on a device whose memory is the host's) samples them by
     /// Vulkan's Y′CbCr model in the device's arithmetic, as the device's own conversion would
@@ -177,7 +181,8 @@ impl DevicePolicy {
     /// pass's triangles a host step records fanned out to its regions where a probe finds they
     /// can be, a `Managed` buffer's named range copied in by the GPU from its host copy as the
     /// submission runs, and an indirect command buffer's records in pooled memory where a held
-    /// host-pointer import costs the device's every submission.
+    /// host-pointer import costs the device's every submission. A `half` result rounds by the
+    /// device's own rounding ([`HalfRoundingPolicy::Native`]).
     pub const UNTRUSTED: DevicePolicy = DevicePolicy {
         pointer_domain: PointerDomain::ResidentTable,
         handle_domain: HandleDomain::Table,
@@ -190,6 +195,7 @@ impl DevicePolicy {
         render_lowering: RenderLoweringPolicy::AtCall,
         host_page_textures: HostPageTexturePolicy::InPlace,
         half_chains: HalfChainPolicy::AtExits,
+        half_rounding: HalfRoundingPolicy::Native,
         ycbcr_in_place_reads: YCbCrInPlacePolicy::Model,
         pipeline_waits: PipelineWaitPolicy::Bounded,
         pipeline_creation_wait: Duration::from_millis(4500),
@@ -237,7 +243,8 @@ impl DevicePolicy {
     /// buffer's records in the runtime's own pages wherever the device imports host pointers,
     /// which a recovery keeps ([`IndirectRecordsPolicy::Carried`]). Every other field is kept,
     /// `unshared_isolation` among them: its default is the one nearer Metal's, whose queues do
-    /// not wait for each other's whole command buffers.
+    /// not wait for each other's whole command buffers. `half_rounding` is kept too:
+    /// [`HalfRoundingPolicy::Exact`] is selected by name alone.
     pub const fn exact_answers(self) -> DevicePolicy {
         DevicePolicy {
             heap_compression: HeapCompressionPolicy::Uncompressed,
@@ -477,6 +484,30 @@ pub enum HalfChainPolicy {
     AtExits,
     /// Every operation's result rounded to `half`, as the AIR computes it.
     EachOperation,
+}
+
+/// How a `half` result the module computes in `float` rounds to `half` (every `half` operation
+/// but the device's 16-bit instructions, and a conversion of a `float` to `half`), and a `half`
+/// texel's value. Where the profile rounds through the device's conversion under the 16-bit float
+/// controls that make it Metal's by the Vulkan spec, on a driver that does not fuse arithmetic
+/// into that conversion (not `DriverWorkaround::HalfConversionFusedWithArithmetic`), both values
+/// emit the same module. Changes emitted code: the profile carries it.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum HalfRoundingPolicy {
+    /// The device's own rounding (the default): its `OpQuantizeToF16` without `shaderFloat16`,
+    /// else its conversion to 16 bits and back, recorded as `PrecisionNote::NativeHalfQuantize`
+    /// or `PrecisionNote::NativeHalfConversion` where it can differ from Metal's.
+    #[default]
+    Native,
+    /// Metal's `half(float)` on every device: integer arithmetic on the `float`'s bits (to
+    /// nearest even, half denormals kept, an infinity from 65520 up, `0x7E00` for a NaN), about
+    /// twenty instructions a rounding where the device's forms take one or two: larger modules
+    /// and longer pipeline creation. A `half` texel keeps the NaN the device decoded, and a
+    /// fast-math `half` chain rounds at each operation, as under [`HalfChainPolicy::EachOperation`].
+    /// A `half` read from or written to its bits stays the device's widening or narrowing.
+    Exact,
 }
 
 /// How a function samples a two-plane YCbCr texture (`YCBCR8_420_2P`, `YCBCR10_420_2P`) whose

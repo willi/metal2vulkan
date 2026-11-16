@@ -761,6 +761,10 @@ pub struct ArithPlan {
     /// texel takes the rounding's NaN (`narrow::round_texel`). Decided by [`finish`], on every
     /// profile that rounds so.
     pub native_half_nans: bool,
+    /// Whether the module rounds an `f32` to `half` by Metal's integer rounding instead of
+    /// [`ArithPlan::quantize`]'s ([`narrow::exact_rounding`], `HalfRoundingPolicy::Exact`), decided
+    /// with it by [`finish`]: then no rounding is native, and a `half` texel keeps its NaN.
+    pub exact_half: bool,
     /// Whether the module computes `half` under the 16-bit float controls
     /// ([`narrow::half_controls`]), decided by [`finish`] from the profile: its `half` `/` and
     /// `sqrt` are the device's 16-bit instructions and it holds its `half` values at 16 bits
@@ -846,6 +850,11 @@ pub fn finish(cx: &mut SelectCx<'_>) -> Result<(), Error> {
     cx.families.arith.native_half = narrow::native_rounding(cx.families.arith.quantize).is_some();
     // Under the float controls a `half`'s NaN is the device's conversion's.
     cx.families.arith.native_half_nans = cx.families.arith.quantize == QuantizeForm::Controlled;
+    // Metal's integer rounding, where the policy asks for it and the form is not Metal's already.
+    let exact = narrow::exact_rounding(cx.profile, cx.families.arith.quantize);
+    cx.families.arith.exact_half = exact;
+    cx.families.arith.native_half &= !exact;
+    cx.families.arith.native_half_nans &= !exact;
     cx.families.arith.controls = narrow::half_controls(cx.profile);
     // An extended-range, padded or bfloat texel's conversion is the device's arithmetic.
     if cx.families.arith.extended_range {

@@ -67,10 +67,11 @@ pub(crate) use mechanism::mechanism;
 pub use metal::{MetalDeviceProperties, SimdSupport, StageSimd};
 pub use policy::{
     BatchOrderPolicy, CompletionPolicy, ContainmentPolicy, DevicePolicy, DontCareColorPolicy,
-    ExtendedRangeBlitPolicy, HalfChainPolicy, HeapAnswerPolicy, HeapCompressionPolicy,
-    HostPageTexturePolicy, IndirectRecordsPolicy, ManagedCopyInPolicy, PipelineWaitPolicy,
-    QueueSharingPolicy, RateMapRegionPolicy, RenderLoweringPolicy, UnsharedIsolationPolicy,
-    UnstoredDontCarePolicy, VertexReachPolicy, WideLinePolicy, YCbCrInPlacePolicy,
+    ExtendedRangeBlitPolicy, HalfChainPolicy, HalfRoundingPolicy, HeapAnswerPolicy,
+    HeapCompressionPolicy, HostPageTexturePolicy, IndirectRecordsPolicy, ManagedCopyInPolicy,
+    PipelineWaitPolicy, QueueSharingPolicy, RateMapRegionPolicy, RenderLoweringPolicy,
+    UnsharedIsolationPolicy, UnstoredDontCarePolicy, VertexReachPolicy, WideLinePolicy,
+    YCbCrInPlacePolicy,
 };
 pub(crate) use profile::whole_point_size;
 pub use profile::{DeviceProfile, SpirvValidation};

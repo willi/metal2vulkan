@@ -317,6 +317,7 @@ fn derive_fields(
         containment,
         isolation: policy.isolation,
         half_chains: policy.half_chains,
+        half_rounding: policy.half_rounding,
         leaf,
         subgroup: subgroup_model(desc, deviates(DriverDeviation::MetalVertexSimdgroups)),
         images,
