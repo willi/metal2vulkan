@@ -1353,11 +1353,17 @@ fn exact_half() -> DevicePolicy {
 /// profile: no `OpQuantizeToF16`, no conversion pair, no native rounding note, and L3 passes. The
 /// one exception is a profile under the float controls whose driver does not fuse arithmetic into
 /// the conversion, whose own rounding is Metal's by the Vulkan spec: it emits the default policy's
-/// module, word for word.
+/// module, word for word. Those profiles are listed by name, so a profile that moves to either
+/// side fails here.
 #[test]
 fn exact_half_rounding_is_metals_on_every_profile() {
-    use crate::device::profile::DriverWorkaround;
     use crate::lower::arith::narrow::{quantizes, rounds_by_conversion};
+    const SPEC_EXACT: [&str; 4] = [
+        "intel-arl-anv",
+        "intel-irisxe-anv",
+        "intel-irisxe-rplp-anv",
+        "intel-uhd770-rpls-anv",
+    ];
     let (Some(plain), Some(arith)) = (
         bitcode(),
         assemble("exact-half-arithmetic", &module_of(&ARITHMETIC)),
@@ -1374,10 +1380,7 @@ fn exact_half_rounding_is_metals_on_every_profile() {
     let mut seen = (0, 0);
     for ((stem, d), (other, e)) in defaults.iter().zip(&exacts) {
         assert_eq!(stem, other);
-        let spec_exact = quantize_form(e) == QuantizeForm::Controlled
-            && !e
-                .workarounds()
-                .contains(&DriverWorkaround::HalfConversionFusedWithArithmetic);
+        let spec_exact = SPEC_EXACT.contains(&stem.as_str());
         if spec_exact {
             seen.1 += 1;
         } else {
@@ -1408,7 +1411,7 @@ fn exact_half_rounding_is_metals_on_every_profile() {
         }
     }
     assert!(
-        seen.0 > 0 && seen.1 > 0,
+        seen.0 > 0 && seen.1 == SPEC_EXACT.len(),
         "integer-rounding and spec-exact profiles: {seen:?}"
     );
 }

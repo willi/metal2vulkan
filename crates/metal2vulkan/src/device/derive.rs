@@ -109,7 +109,7 @@ impl Device {
             ));
         }
         let fields = derive_fields(&desc, &policy, &deviations);
-        let profile = DeviceProfile::of(fields);
+        let profile = DeviceProfile::of(fields, policy.half_rounding);
         let metal = MetalDeviceProperties::derive(&profile, &desc.allocation);
         Ok(Device(Arc::new(DeviceInner {
             fingerprint: profile.fingerprint(),
@@ -317,7 +317,6 @@ fn derive_fields(
         containment,
         isolation: policy.isolation,
         half_chains: policy.half_chains,
-        half_rounding: policy.half_rounding,
         leaf,
         subgroup: subgroup_model(desc, deviates(DriverDeviation::MetalVertexSimdgroups)),
         images,

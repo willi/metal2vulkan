@@ -95,6 +95,13 @@ pub const FILTERED_LANES: u32 = 5;
 /// per call (`the_half_texel_routine_words_bound_its_emission`).
 pub const ROUTINE_WORDS: u64 = 400;
 
+/// The bound on the routine's size in every `QuantizeForm` under Metal's rounding
+/// (`ModuleBuilder::exact_half`, `HalfRoundingPolicy::Exact`), whose integer rounding of a texel is
+/// some twenty instructions and their constants where a form's is one or two
+/// (`the_half_texel_routine_words_bound_its_emission_under_exact`). The estimate still counts
+/// [`ROUTINE_WORDS`], as every word forecast counts the form's rounding.
+pub const ROUTINE_WORDS_EXACT: u64 = 640;
+
 /// An upper estimate of one call's words: the call and its two constant arguments.
 pub const CALL_WORDS: u32 = 16;
 

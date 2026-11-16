@@ -2504,7 +2504,8 @@ fn a_half_nan_constant_widens_with_its_bits() {
 /// 65520 edge and NaNs included, which the interpreter's quantize and conversion do not all
 /// answer), on scalars and vectors, with no `OpQuantizeToF16` and no conversion pair in the
 /// module. The rounded value is stored as the `f32` it is held in, so a NaN is Metal's `0x7E00`
-/// widened. `round_texel` is too but for a NaN, which is the texel's own bits.
+/// widened. `round_texel` is too but for a NaN, which is the texel's own bits. The device's own
+/// rounding flags are set as well (`native_half`, `native_half_nans`): `exact_half` alone decides.
 #[test]
 fn integer_half_rounding_is_metals_conversion() {
     use crate::spirv::builder::QuantizeForm;
@@ -2549,6 +2550,8 @@ fn integer_half_rounding_is_metals_conversion() {
             for (lanes, input, cs) in [(h, f32f, &cases), (v, vec(f32f, 3), &vc)] {
                 let body = |fb: &mut FunctionBuilder<'_>, x: &[Value]| {
                     fb.module().set_quantize_form(form);
+                    fb.module().set_native_half(true);
+                    fb.module().set_native_half_nans(true);
                     fb.module().set_exact_half(true);
                     round(fb, lanes, x[0])
                 };

@@ -64,7 +64,8 @@ mod merges;
 
 use crate::budget::Meter;
 use crate::device::profile::{DriverWorkaround, Independence};
-use crate::device::{DeviceProfile, HalfRoundingPolicy};
+use crate::device::DeviceProfile;
+use crate::device::HalfRoundingPolicy;
 use crate::error::Error;
 use crate::lower::arith::legal::{FloatFmt, Form, Held};
 use crate::lower::arith::ops::{fsplat, splat, ty};
@@ -188,8 +189,7 @@ pub fn native_rounding(form: QuantizeForm) -> Option<PrecisionNote> {
 pub fn exact_rounding(p: &DeviceProfile, form: QuantizeForm) -> bool {
     let fuses =
         (p.fields().workarounds).contains(&DriverWorkaround::HalfConversionFusedWithArithmetic);
-    p.fields().half_rounding == HalfRoundingPolicy::Exact
-        && (form != QuantizeForm::Controlled || fuses)
+    p.half_rounding() == HalfRoundingPolicy::Exact && (form != QuantizeForm::Controlled || fuses)
 }
 
 /// `x` (`f32` lanes of form `wide`) rounded to `half` by integer arithmetic on its bits, Metal's
@@ -201,6 +201,8 @@ pub fn exact_rounding(p: &DeviceProfile, form: QuantizeForm) -> bool {
 /// between 65504 and `2^16`, which rounds to the even `2^16`), and for an infinity, the result is
 /// the infinity of `x`'s sign. A NaN gives `0x7E00`'s widening, `0x7FC00000`, of either sign and
 /// any payload: Metal converts every `float` NaN to `0x7E00`. Below `2^-14`, [`scaled`]'s.
+/// `texel_round::f32_to_half` to nearest even gives the same halves but takes about twice the
+/// instructions and answers a NaN its own way, so this stays separate.
 fn integer(fb: &mut FunctionBuilder<'_>, wide: Form, x: Value) -> BResult<Value> {
     let u = u32_form(wide);
     let ut = ty(fb, u)?;
@@ -656,7 +658,9 @@ pub fn round_texel_words(f: Form) -> u32 {
 pub fn round_texel(fb: &mut FunctionBuilder<'_>, f: Form, x: Value) -> BResult<Value> {
     let native = fb.module().native_half();
     match f.held {
-        Held::Float(FloatFmt::Half) if native || fb.module().native_half_nans() => {
+        Held::Float(FloatFmt::Half)
+            if !fb.module().exact_half() && (native || fb.module().native_half_nans()) =>
+        {
             round_measured(fb, f, x)
         }
         Held::Float(FloatFmt::Half) => {

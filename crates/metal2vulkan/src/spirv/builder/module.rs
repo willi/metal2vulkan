@@ -373,7 +373,10 @@ impl ModuleBuilder {
     /// Round an `f32` to `half` by Metal's integer rounding (`lower::arith::narrow::round`,
     /// `HalfRoundingPolicy::Exact`) instead of the [`ModuleBuilder::quantize_form`]'s, which still
     /// decides how the module holds `half` values and moves their bits. Emission sets it with the
-    /// form; a builder that never sets it rounds in its form.
+    /// form; a builder that never sets it rounds in its form. It outranks
+    /// [`ModuleBuilder::native_half`] and [`ModuleBuilder::native_half_nans`]. The word
+    /// forecasts (`lower::arith::narrow::round_words`) count the form's rounding, so under it
+    /// they undercount.
     pub fn set_exact_half(&mut self, exact: bool) {
         self.exact_half = exact;
     }

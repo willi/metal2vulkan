@@ -5,12 +5,13 @@
 //! field, a policy value or a precision note added to the crate fails to compile here until it is
 //! classed, and so reaches the ledger.
 
+use crate::device::HalfRoundingPolicy;
 use crate::device::{
     BatchOrderPolicy, CompletionPolicy, DevicePolicy, DontCareColorPolicy, ExtendedRangeBlitPolicy,
-    HalfChainPolicy, HalfRoundingPolicy, HeapAnswerPolicy, HeapCompressionPolicy,
-    HostPageTexturePolicy, IndirectRecordsPolicy, ManagedCopyInPolicy, PipelineWaitPolicy,
-    QueueSharingPolicy, RateMapRegionPolicy, RenderLoweringPolicy, UnsharedIsolationPolicy,
-    UnstoredDontCarePolicy, VertexReachPolicy, WideLinePolicy, YCbCrInPlacePolicy,
+    HalfChainPolicy, HeapAnswerPolicy, HeapCompressionPolicy, HostPageTexturePolicy,
+    IndirectRecordsPolicy, ManagedCopyInPolicy, PipelineWaitPolicy, QueueSharingPolicy,
+    RateMapRegionPolicy, RenderLoweringPolicy, UnsharedIsolationPolicy, UnstoredDontCarePolicy,
+    VertexReachPolicy, WideLinePolicy, YCbCrInPlacePolicy,
 };
 use crate::pipeline::PrecisionNote;
 use std::collections::BTreeSet;
@@ -93,9 +94,10 @@ fn choices() -> Vec<Choice> {
         rate_map_regions: _,
         managed_copy_in: _,
         indirect_records: _,
-        // The translator's: how a `half` chain rounds without `shaderFloat16`, how a `half` result
-        // rounds, and how planes of a two-plane YCbCr texture read in place are sampled.
+        // The translator's: how a `half` chain rounds without `shaderFloat16`, and how planes of a
+        // two-plane YCbCr texture read in place are sampled.
         half_chains: _,
+        // The translator's too: how a `half` result rounds.
         half_rounding: _,
         ycbcr_in_place_reads: _,
     } = p;

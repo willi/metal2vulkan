@@ -181,8 +181,7 @@ impl DevicePolicy {
     /// pass's triangles a host step records fanned out to its regions where a probe finds they
     /// can be, a `Managed` buffer's named range copied in by the GPU from its host copy as the
     /// submission runs, and an indirect command buffer's records in pooled memory where a held
-    /// host-pointer import costs the device's every submission. A `half` result rounds by the
-    /// device's own rounding ([`HalfRoundingPolicy::Native`]).
+    /// host-pointer import costs the device's every submission.
     pub const UNTRUSTED: DevicePolicy = DevicePolicy {
         pointer_domain: PointerDomain::ResidentTable,
         handle_domain: HandleDomain::Table,
@@ -243,8 +242,7 @@ impl DevicePolicy {
     /// buffer's records in the runtime's own pages wherever the device imports host pointers,
     /// which a recovery keeps ([`IndirectRecordsPolicy::Carried`]). Every other field is kept,
     /// `unshared_isolation` among them: its default is the one nearer Metal's, whose queues do
-    /// not wait for each other's whole command buffers. `half_rounding` is kept too:
-    /// [`HalfRoundingPolicy::Exact`] is selected by name alone.
+    /// not wait for each other's whole command buffers.
     pub const fn exact_answers(self) -> DevicePolicy {
         DevicePolicy {
             heap_compression: HeapCompressionPolicy::Uncompressed,
@@ -504,9 +502,21 @@ pub enum HalfRoundingPolicy {
     /// Metal's `half(float)` on every device: integer arithmetic on the `float`'s bits (to
     /// nearest even, half denormals kept, an infinity from 65520 up, `0x7E00` for a NaN), about
     /// twenty instructions a rounding where the device's forms take one or two: larger modules
-    /// and longer pipeline creation. A `half` texel keeps the NaN the device decoded, and a
-    /// fast-math `half` chain rounds at each operation, as under [`HalfChainPolicy::EachOperation`].
-    /// A `half` read from or written to its bits stays the device's widening or narrowing.
+    /// and longer pipeline creation.
+    ///
+    /// A `half` texel rounds so too and keeps the NaN the device decoded; where both values emit
+    /// the same module (above) its NaN is the conversion's. A texel whose Metal `half` is not the
+    /// rounding of its `f32` value still records `PrecisionNote::HalfTexelConversion` and reads
+    /// as under the default. A `half` read from or written to its bits stays the device's
+    /// widening or narrowing.
+    ///
+    /// A fast-math `half` chain rounds at each operation, as under
+    /// [`HalfChainPolicy::EachOperation`], whatever `half_chains` holds, so that this value alone
+    /// rounds every `half` operation as its AIR does.
+    ///
+    /// Neither [`DevicePolicy::exact_answers`] nor [`DevicePolicy::UNTRUSTED`] selects it: a
+    /// caller sets it by name. The validation and conformance runs under `exact_answers()` expect
+    /// the device's rounding notes, which this value removes.
     Exact,
 }
 
