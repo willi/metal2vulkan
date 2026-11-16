@@ -94,6 +94,9 @@ fn choices() -> Vec<Choice> {
         rate_map_regions: _,
         managed_copy_in: _,
         indirect_records: _,
+        // The runtime's, and no accuracy choice: how long a queue's front batch may go without
+        // its timeline advancing before it fails as Metal's timed-out command buffer.
+        watchdog: _,
         // The translator's: how a `half` chain rounds without `shaderFloat16`, and how planes of a
         // two-plane YCbCr texture read in place are sampled.
         half_chains: _,

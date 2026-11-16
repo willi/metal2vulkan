@@ -4558,6 +4558,7 @@ field	metal2vulkan::device::DevicePolicy.render_lowering	pub render_lowering: Re
 field	metal2vulkan::device::DevicePolicy.unshared_isolation	pub unshared_isolation: UnsharedIsolationPolicy
 field	metal2vulkan::device::DevicePolicy.unstored_dont_care_loads	pub unstored_dont_care_loads: UnstoredDontCarePolicy
 field	metal2vulkan::device::DevicePolicy.vertex_reach	pub vertex_reach: VertexReachPolicy
+field	metal2vulkan::device::DevicePolicy.watchdog	pub watchdog: Option<Duration>
 field	metal2vulkan::device::DevicePolicy.wide_lines	pub wide_lines: WideLinePolicy
 field	metal2vulkan::device::DevicePolicy.ycbcr_in_place_reads	pub ycbcr_in_place_reads: YCbCrInPlacePolicy
 field	metal2vulkan::device::DriverDiagnostic.id	pub id: i32

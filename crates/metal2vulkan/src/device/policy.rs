@@ -8,9 +8,9 @@ use std::time::Duration;
 /// `completion`, `batch_order`, `render_lowering`, `host_page_textures`, `pipeline_waits`,
 /// `pipeline_creation_wait`, `pipeline_commit_wait`, `wide_lines`, `extended_range_blits`,
 /// `queue_sharing`, `unshared_isolation`, `dont_care_colors`, `unstored_dont_care_loads`,
-/// `vertex_reach`, `rate_map_regions`, `managed_copy_in` and `indirect_records` can change emitted
-/// code, so the profile carries it (containment as the encoding it selects) and its fingerprint
-/// covers it; those nineteen are the runtime's alone (a heap's
+/// `vertex_reach`, `rate_map_regions`, `managed_copy_in`, `indirect_records` and `watchdog` can
+/// change emitted code, so the profile carries it (containment as the encoding it selects) and its
+/// fingerprint covers it; those twenty are the runtime's alone (a heap's
 /// compressed texture's image, what a heap texture's size query answers, when the host sees a
 /// command buffer complete, how a batch begins after the earlier ones
 /// of its queue, where a render encoder's calls are lowered, what holds a sampled texture over host
@@ -21,8 +21,9 @@ use std::time::Duration;
 /// reads of an attachment it loads `DontCare` and does not store, which draws fetch a vertex
 /// layout in the shader where the device's fixed-function input would wrap past 4 GiB, how a
 /// rate-mapped pass's draws reach its regions, when a `Managed` buffer's GPU copy takes the
-/// bytes a `didModifyRange:` names, and where an indirect command buffer's records lie on a device
-/// whose held host-pointer imports cost every submission), and no profile carries them.
+/// bytes a `didModifyRange:` names, where an indirect command buffer's records lie on a device
+/// whose held host-pointer imports cost every submission, and how long a queue's front batch may go
+/// without advancing), and no profile carries them.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -102,6 +103,14 @@ pub struct DevicePolicy {
     /// by default (as the creation wait, above). Unread under `Exact`. The runtime's alone: no
     /// emitted code changes.
     pub pipeline_commit_wait: Duration,
+    /// How long a queue's front batch may go without its timeline advancing before it fails as
+    /// Metal's timed-out command buffer (`GpuHang`) and its generation stops and is recovered from
+    /// (the runtime's `command_buffer/stall.rs`): 20.2 s by default, the largest of Metal's
+    /// measured bounds, so no work that Metal completes on any of the GPUs measured fails. `None`
+    /// fails no batch for its time, for a device far slower than any Mac's GPU (a CPU rasterizer
+    /// under load): its slow work completes late, and a stop whose probe is answered is never
+    /// found. The runtime's alone: no emitted code changes.
+    pub watchdog: Option<Duration>,
     /// Whether a line Apple's `setLineWidth:` widens, at a width the device's own lines draw (which
     /// no device's are taken to draw as Metal's: strict lines, lines that are not parallelograms, a
     /// width off the device's granularity or below 1, a driver's parallelograms, whose ends the
@@ -199,6 +208,7 @@ impl DevicePolicy {
         pipeline_waits: PipelineWaitPolicy::Bounded,
         pipeline_creation_wait: Duration::from_millis(4500),
         pipeline_commit_wait: Duration::from_millis(4500),
+        watchdog: Some(Duration::from_millis(20_200)),
         wide_lines: WideLinePolicy::Device,
         extended_range_blits: ExtendedRangeBlitPolicy::Kept,
         queue_sharing: QueueSharingPolicy::Adaptive,

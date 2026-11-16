@@ -40,7 +40,8 @@
 //! - **The watchdog**, Metal's own bound on a command buffer. Each queue's front batch has its
 //!   own clock ([`Clock::front_held`]), which runs while its waiter's waits run out with it
 //!   pending and stops whenever its queue's timeline advances, whatever the probe or another
-//!   engine answers. Past [`WATCHDOG`] the front fails as Metal's timed-out command buffer does
+//!   engine answers. Past the device's bound (`DevicePolicy::watchdog`) the front fails as Metal's
+//!   timed-out command buffer does
 //!   (`GpuHang`, code 2, which counts against its queue as Metal counts a timeout: the M3 Max's
 //!   above), the rest in flight as its victims (`GpuRecoveryVictim`), and the generation is
 //!   marked stopped ([`Stop::Watchdog`]), parked and recovered from as above: a channel that ran
@@ -55,11 +56,12 @@
 //!   generation held, and a driver may wait for its work at the process's exit (NVIDIA's did:
 //!   docs/FAST-PATHS.md, known gaps).
 //! - **Bounds.** [`STALL`] is 10 s, twice the M3 Max's bound and under the x86 Macs'; a stopped
-//!   generation whose probe goes unanswered fails after 12 s at least. [`WATCHDOG`] is 20.2 s,
-//!   the largest of Metal's measured bounds (the x86 AMD GPU's), so no work that Metal completes
-//!   on any of the GPUs measured is failed; the M3 Max fails it from 5 s, the runtime from
-//!   20.2 s. A device without a staging queue sends no probe, and a stop there is found by the
-//!   watchdog alone (docs/FAST-PATHS.md, known gaps).
+//!   generation whose probe goes unanswered fails after 12 s at least. The watchdog's is the
+//!   policy's, 20.2 s by default, the largest of Metal's measured bounds (the x86 AMD GPU's), so no
+//!   work that Metal completes on any of the GPUs measured is failed; the M3 Max fails it from 5 s,
+//!   the runtime from 20.2 s. A device without a staging queue sends no probe, and a stop there is
+//!   found by the watchdog alone (docs/FAST-PATHS.md, known gaps). A policy of no watchdog (`None`)
+//!   fails no front for its time: a stop whose probe is answered then holds its work to the end.
 
 use crate::exit_guard::{self, Call};
 use crate::Device;
@@ -73,10 +75,6 @@ pub(super) const STALL: Duration = Duration::from_secs(10);
 /// How long a probe waits for an answer before the generation counts as stopped.
 pub(super) const PROBE: Duration = Duration::from_secs(2);
 
-/// How long a queue's front batch may go without its timeline advancing before it fails as
-/// Metal's timed-out command buffer (the module docs): the largest of Metal's measured bounds.
-pub(super) const WATCHDOG: Duration = Duration::from_millis(20_200);
-
 /// How long one look of a probe waits for its answer.
 const LOOK: Duration = Duration::from_millis(100);
 
@@ -85,7 +83,7 @@ const LOOK: Duration = Duration::from_millis(100);
 pub(crate) enum Stop {
     /// No work of it advanced, and a probe on another engine did not complete.
     Unanswered,
-    /// A queue's front batch went past [`WATCHDOG`] without its timeline advancing.
+    /// A queue's front batch went past the watchdog's bound without its timeline advancing.
     Watchdog,
 }
 
@@ -180,15 +178,14 @@ pub(super) fn stall_after(device: &Device) -> Duration {
     STALL
 }
 
-/// How long a queue's front may go without its timeline advancing on `device`: [`WATCHDOG`], or
-/// what a device test set (`device/line.rs`'s hooks).
-pub(super) fn watchdog_after(device: &Device) -> Duration {
+/// How long a queue's front may go without its timeline advancing on `device`: what a device test
+/// set (`device/line.rs`'s hooks), or its policy's `watchdog`, where `None` is no bound.
+pub(super) fn watchdog_after(device: &Device) -> Option<Duration> {
     #[cfg(all(test, any(m2v_gpu, m2v_cpu_icd)))]
     if let Some(after) = *crate::device::lock(&device.line().hooks.watchdog_after) {
-        return after;
+        return Some(after);
     }
-    let _ = device;
-    WATCHDOG
+    device.compile_device().policy().watchdog
 }
 
 /// Say that the front batch of `device`'s `VkQueue` `queue` went `held` without its timeline

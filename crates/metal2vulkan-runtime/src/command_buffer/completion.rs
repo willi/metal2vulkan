@@ -1300,8 +1300,7 @@ fn stalled(
             return Ok(value);
         }
         let held = pending.stall.front_held(queue);
-        let bound = super::stall::watchdog_after(device);
-        if held >= bound {
+        if let Some(bound) = super::stall::watchdog_after(device).filter(|bound| held >= *bound) {
             pending.stall.front_advanced(queue);
             pending.timed_out.get_or_insert(queue);
             drop(pending);

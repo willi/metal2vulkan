@@ -894,8 +894,8 @@ pub(crate) mod hooks {
         /// stopped: a stall past `stall_after` stops the generation.
         pub(crate) probe_unanswered: AtomicBool,
         /// How long a queue's front batch may go without its timeline advancing before it fails
-        /// as Metal's timed-out command buffer (`command_buffer/stall.rs`), in place of its
-        /// `WATCHDOG`.
+        /// as Metal's timed-out command buffer (`command_buffer/stall.rs`), in place of the
+        /// policy's `watchdog`.
         pub(crate) watchdog_after: Mutex<Option<Duration>>,
         /// Run once, on the thread that lowers it, as the draw that is the count's (from zero)
         /// to take every step since it was set reaches its keeping, after its uses' noting: what

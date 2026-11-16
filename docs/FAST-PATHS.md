@@ -651,7 +651,9 @@ driver's. Each is open work.
   the graphics queue's batch never completed. Either way the rest in flight fail as victims
   (`GpuRecoveryVictim`) and the device recovers. A device without a staging queue sends no
   probe, so a stop there is found by the watchdog alone. Work Metal's M3 Max would fail between 5
-  and 20.2 s runs on to its end, or fails at 20.2 s. The stopped `VkDevice` is parked
+  and 20.2 s runs on to its end, or fails at 20.2 s. The 20.2 s is `DevicePolicy::watchdog`'s
+  default; a policy of none (`None`), for a device far slower than any Mac's GPU, fails no work
+  for its time, and a stop whose probe is answered then holds its work to the end. The stopped `VkDevice` is parked
   (`release.rs`): it and every object of it stay to the process's end, with the host pages its
   imports hold (`Device::is_parked`). NVIDIA's driver (620.70.06)
   tears down every `VkDevice` left at the process's exit in an exit handler of `libEGL_nvidia`,

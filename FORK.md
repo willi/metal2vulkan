@@ -3,7 +3,8 @@
 This tree follows the source repository's `development` branch. One thing it adds departs from
 the source's rules on purpose: `DevicePolicy::half_rounding`, with
 `HalfRoundingPolicy { Native, Exact }`. Read this file before removing or reworking it, and when
-merging the source in.
+merging the source in. It also adds `DevicePolicy::watchdog`, which keeps the source's rules
+([The watchdog's bound](#the-watchdogs-bound)).
 
 ## The switch
 
@@ -68,6 +69,21 @@ These describe the default and say nothing of `Exact`. They are left alone so me
   `Exact` module; `check_emitted` still caps the emitted words.
 - No release-mode timing of `Exact` has been taken.
 
+## The watchdog's bound
+
+`DevicePolicy::watchdog: Option<Duration>` is the runtime's bound on a queue's front batch
+(`crates/metal2vulkan-runtime/src/command_buffer/stall.rs`), a constant in the source. The
+default, `Some(20.2 s)`, is the source's bound, so a default device acts as the source's. `None`
+fails no batch for its time. A caller whose device runs far slower than any Mac's GPU (a CPU
+rasterizer under load) sets it, because past the bound the device recovers, and a recovered device
+refuses what was made before the recovery (`MadeBeforeRecovery`). The runtime alone reads it: no
+profile carries it, and no fingerprint moves.
+
+It lives in `device/policy.rs` (the field, and its value in `UNTRUSTED`) and `tests/fast_paths.rs`
+(its class), and in the runtime's `command_buffer/stall.rs` (`watchdog_after`),
+`command_buffer/completion.rs` (its one read) and `tests/stall.rs` (the default fails a front at
+its bound; `None` fails none).
+
 ## Each merge of the source
 
 1. Resolve conflicts in the files above. Each new `DevicePolicy` constructor needs the field.
@@ -78,6 +94,8 @@ These describe the default and say nothing of `Exact`. They are left alone so me
    `crates/metal2vulkan-validation/runtime-sources.sha256`: `device/derive.rs`, `device/mod.rs`,
    `device/policy.rs` and `device/profile.rs` are among its inputs.
 4. Run `python3 scripts/api-signatures/signatures.py --bless` and check that only the
-   `HalfRoundingPolicy` rows are new.
+   `HalfRoundingPolicy` and `DevicePolicy::watchdog` rows are new.
 5. Run the `half` tests with spirv-val and llvm-as on `PATH`, and the runtime's `half_rounding`
-   device test on a Vulkan device.
+   and `stall` device tests on a Vulkan device.
+6. Check that the runtime still reads the watchdog's bound only through `stall::watchdog_after`:
+   search `crates/metal2vulkan-runtime/src` for a new bound beside `Stop::Watchdog`.
