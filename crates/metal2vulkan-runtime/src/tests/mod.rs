@@ -772,6 +772,8 @@ mod surface_depth_usage_shadow;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]
 mod surface_shapes;
 mod surface_two_planes;
+#[cfg(any(m2v_gpu, m2v_cpu_icd))]
+mod surface_write_back;
 #[cfg(all(unix, any(m2v_gpu, m2v_cpu_icd)))]
 mod sync_file;
 #[cfg(any(m2v_gpu, m2v_cpu_icd))]

@@ -235,6 +235,7 @@ surface! {
         enum BatchOrderPolicy N;
         enum RenderLoweringPolicy N;
         enum HostPageTexturePolicy N;
+        enum SurfaceWriteBackPolicy N;
         enum HalfChainPolicy N;
         enum HalfRoundingPolicy N;
         enum YCbCrInPlacePolicy N;

@@ -12,6 +12,7 @@ use super::super::shadow::{
 use super::super::shadow_merge::ScratchSpares;
 use super::super::tracker::{Access, ImagePlace, Use, UseRange};
 use ash::vk;
+use metal2vulkan::device::{DevicePolicy, SurfaceWriteBackPolicy};
 use metal2vulkan::error::Feature;
 use std::ops::Range;
 use std::sync::atomic::AtomicU64;
@@ -1320,7 +1321,8 @@ fn one_command_writing_a_texture_and_its_bytes_another_way_keeps_and_merges_it()
 /// tracked `Private` buffer's bytes, which no other writer writes while a command buffer runs,
 /// merge nothing back: the last is copied in and back; an untracked `Private` buffer's merges.
 /// So does an IOSurface plane's in a tracked `Private` buffer (a consumer's device copy of the
-/// surface), where a plane the CPU may write merges.
+/// surface), where a plane the CPU may write merges; but under `SurfaceWriteBackPolicy::CopyBack`
+/// (this tree's own: FORK.md) that plane is copied in and back too.
 #[test]
 fn a_texture_over_a_buffer_s_bytes_is_merged_where_it_would_be_copied_back() {
     let buffer = ResourceKey::new();
@@ -1338,7 +1340,12 @@ fn a_texture_over_a_buffer_s_bytes_is_merged_where_it_would_be_copied_back() {
     };
     assert!(!with(Backing::PrivateSurface, true).merges_back());
     assert!(with(Backing::PrivateSurface, false).merges_back());
-    assert!(with(Backing::Surface, true).merges_back());
+    let surface = |policy| with(Backing::Surface(policy), true);
+    let untrusted = DevicePolicy::UNTRUSTED.surface_write_back;
+    let exact = DevicePolicy::UNTRUSTED.exact_answers().surface_write_back;
+    assert!(surface(untrusted).merges_back() && surface(exact).merges_back());
+    let copied = Arc::new(surface(SurfaceWriteBackPolicy::CopyBack));
+    assert!(!copied.merges_back());
     let mut dropped = Arc::into_inner(shadow(buffer, 0..1024)).expect("one holder");
     dropped.drops_writes = true;
     assert!(!dropped.merges_back());
@@ -1378,6 +1385,12 @@ fn a_texture_over_a_buffer_s_bytes_is_merged_where_it_would_be_copied_back() {
     assert_eq!(run(&mut sync, &[(&private, true)], &[]), [Moved::Into(kp)]);
     assert_eq!(run(&mut sync, &[(&private, true)], &[]), []);
     assert_eq!(moved(&sync.finish()), [Moved::Back(kp)]);
+    // A plane the CPU may write, under `CopyBack`: so too.
+    let kc = copied.shadow_key;
+    let mut sync = ShadowSync::default();
+    assert_eq!(run(&mut sync, &[(&copied, true)], &[]), [Moved::Into(kc)]);
+    assert_eq!(run(&mut sync, &[(&copied, true)], &[]), []);
+    assert_eq!(moved(&sync.finish()), [Moved::Back(kc)]);
     // Every texel replaced: no copy in, no keep, a copy back.
     let mut sync = ShadowSync::<u32>::default();
     let replacing = ShadowUse {
@@ -1913,7 +1926,7 @@ const SURFACE_TEXELS: u64 = 3840 * 2160;
 /// A shadowed texture over a 4K IOSurface plane's bytes in `plane`: one region of 3840x2160
 /// texels of 4 bytes, its rows 4096 texels apart (a padded plane, which no linear image of the
 /// device aliases, so its texture is shadowed). Its copies are cut to rectangles
-/// (`ShadowCopies::cuts`) and it merges back, as a surface's does.
+/// (`ShadowCopies::cuts`) and it merges back, as a surface's does under the default policy.
 fn surface_shadow(plane: ResourceKey) -> Arc<ShadowCopies> {
     let bytes = 0..4 * 4096 * SURFACE_TEXELS / 3840;
     let mut copies = Arc::into_inner(shadow_in(
@@ -1923,7 +1936,7 @@ fn surface_shadow(plane: ResourceKey) -> Arc<ShadowCopies> {
         bytes,
     ))
     .expect("one holder");
-    copies.backing = Backing::Surface;
+    copies.backing = Backing::Surface(SurfaceWriteBackPolicy::Merge);
     if let ShadowSource::Bytes {
         target: ShadowTarget::Image { regions, .. },
         ..
@@ -2081,7 +2094,7 @@ fn a_large_surface_is_copied_in_whole_once_for_a_command_buffer_that_samples_it(
     let plane = ResourceKey::new();
     let s = surface_shadow(plane);
     assert_eq!(s.texels(), SURFACE_TEXELS);
-    assert_eq!(s.backing, Backing::Surface);
+    assert_eq!(s.backing, Backing::Surface(SurfaceWriteBackPolicy::Merge));
     assert!(s.merges_back(), "a surface's bytes have another writer");
     // One encoder: its first command's copy in is whole, and every later command of it takes
     // none, the image holding the plane as the encoder's commands left it.
