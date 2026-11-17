@@ -82,6 +82,10 @@
 //!   keeps every texel next, which every later pass of the run writes inside, and one that needs
 //!   texels beyond those the image holds (its copy in moved only a pass's scissors' texels) merges
 //!   what was kept and copies every texel in.
+//!   A tracked IOSurface plane's shadow the CPU may write is copied back instead under the
+//!   device's `SurfaceWriteBackPolicy::CopyBack` (this tree's own, `FORK.md`), whose caller
+//!   answers that nothing but the device's commands writes the plane's bytes while a command
+//!   buffer that writes through it runs ([`ShadowCopies::copied_back`]).
 //! - **Overwrites over logged pages** ([`ShadowCopies::logged`]: host pages whose consumer logs
 //!   every write to them, `dirty_pages.rs`). A command that replaces every texel of such a shadow
 //!   takes the merge instead of the plain copy back: its copy in (which moves only the rows the
@@ -290,6 +294,7 @@ use super::ycbcr::{YCbCrConversion, YCbCrWriteBack};
 use super::Device;
 use crate::device::functions::Vk;
 use ash::vk;
+use metal2vulkan::device::SurfaceWriteBackPolicy;
 use metal2vulkan::error::{Feature, Unsupported};
 use metal2vulkan::metal::PixelFormat;
 use std::ops::Range;
@@ -562,8 +567,10 @@ pub(super) enum Backing {
     /// Host pages that the texture's own image lies in too (an aliasing image, a pitched host
     /// image among them), a shadow of which reads them as the image left them.
     AliasedHostPages,
-    /// The bytes of an IOSurface's plane that the CPU may write: host pages, or a buffer it maps.
-    Surface,
+    /// The bytes of an IOSurface's plane that the CPU may write: host pages, or a buffer it maps;
+    /// with how the device's policy writes a shadow of them back
+    /// (`DevicePolicy::surface_write_back`, this tree's own: `FORK.md`).
+    Surface(SurfaceWriteBackPolicy),
     /// The bytes of an IOSurface's plane in a buffer of private or memoryless storage the runtime
     /// allocated (a consumer's device copy of the surface): only the runtime's commands write
     /// them.
@@ -571,7 +578,8 @@ pub(super) enum Backing {
 }
 
 impl Backing {
-    /// What holds the bytes of `buffer`, a texture's over an IOSurface's plane where `surface`.
+    /// What holds the bytes of `buffer`, a texture's over an IOSurface's plane where `surface`: a
+    /// plane the CPU may write with its device's policy for it.
     pub(super) fn of(buffer: &Buffer, surface: bool) -> Backing {
         let private = matches!(
             buffer.resource_options().storage_mode(),
@@ -579,7 +587,10 @@ impl Backing {
         );
         match (surface, buffer.caller_memory(), private) {
             (true, None, true) => Backing::PrivateSurface,
-            (true, _, _) => Backing::Surface,
+            (true, _, _) => {
+                let policy = buffer.generation().compile_device().policy();
+                Backing::Surface(policy.surface_write_back)
+            }
             (false, Some(_), _) => Backing::HostPages,
             (false, None, true) => Backing::PrivateBuffer,
             (false, None, false) => Backing::MappedBuffer,
@@ -906,7 +917,7 @@ impl ShadowCopies {
     /// (`WorkCounts::shadow_texels_first_copied_in_large_surfaces` and kin): a texture over an
     /// IOSurface's plane of at least [`LARGE_SURFACE_TEXELS`] texels.
     pub(super) fn large_surface(&self) -> bool {
-        let surface = matches!(self.backing, Backing::Surface | Backing::PrivateSurface);
+        let surface = matches!(self.backing, Backing::Surface(_) | Backing::PrivateSurface);
         surface && self.texels() >= LARGE_SURFACE_TEXELS
     }
 
@@ -1275,10 +1286,32 @@ impl ShadowCopies {
     /// another queue's commands an untracked buffer's, which the tracker leaves to the program. An
     /// image's shadow, a turned one and two planes take no merge ([`unmerged`](Self::unmerged)),
     /// and writes Metal drops, and those through a copy taken at use, go back no way.
+    ///
+    /// Nor is a plane's the device's policy copies back ([`copied_back`](Self::copied_back), this
+    /// tree's own: `FORK.md`).
     pub(super) fn merges_back(&self) -> bool {
         let bytes = matches!(&self.source, ShadowSource::Bytes { .. });
         let other_writer = !self.only_commands_write();
-        bytes && other_writer && self.writes_reach_truth() && self.unmerged().is_none()
+        bytes
+            && other_writer
+            && self.writes_reach_truth()
+            && self.unmerged().is_none()
+            && !self.copied_back()
+    }
+
+    /// Whether a write through the texture goes back by a copy where the source would merge it,
+    /// by the device's [`SurfaceWriteBackPolicy::CopyBack`] (this tree's own: `FORK.md`): a
+    /// tracked texture over an IOSurface plane the CPU may write. Its caller answers that nothing
+    /// but the device's commands writes the plane's bytes while a command buffer that writes
+    /// through it runs; the tracker orders the device's other queues' commands that touch a
+    /// tracked texture, while another queue may write an untracked plane's bytes meanwhile, so
+    /// that one merges back under either value. Only the write back changes: the plane's bytes
+    /// are still the CPU's between command buffers, so its image never stands across them
+    /// ([`stands_across`](Self::stands_across)) and is copied in again for each, and a command
+    /// that writes it two ways still merges, in place where the source's merge is.
+    pub(super) fn copied_back(&self) -> bool {
+        let copy_back = Backing::Surface(SurfaceWriteBackPolicy::CopyBack);
+        self.tracked && self.backing == copy_back
     }
 
     /// Whether what the commands write through the shadow goes back into its truth: not where

@@ -135,6 +135,28 @@ known. The rest of the differences are docs/API.md section 9's precision notes.
 
 ## Accuracy switches whose default is Metal's
 
+- `surface_write_back = SurfaceWriteBackPolicy::Merge` (the default) keeps a shadowed texture over
+  an IOSurface plane the CPU may write (host pages, the caller's own memory, a `Shared` or `Managed`
+  buffer's) after its copy in and merges back only the words its commands changed, as every shadow
+  over bytes another writer may write is (`shadow.rs`, "Merged back"). `surface_write_back =
+  SurfaceWriteBackPolicy::CopyBack` copies a tracked texture's back, as a tracked `Private` buffer's
+  plane is: no keep and no merge dispatch. An untracked plane's texture, which another queue may
+  write meanwhile, and a command that writes the plane two ways still merge. A copy back writes
+  every texel it moves (inside the rectangle the commands bound their writes to, else all of them),
+  the ones no command wrote with what the copy in read, so it loses a write another writer makes to
+  those texels' bytes between the copy in (over pages whose writes a log reports, the commit) and
+  the copy back, inside the run of a command buffer that writes through the plane. Metal keeps such
+  a write, except one made while a render pass that loads and stores the plane runs, to a texel of a
+  32x32 tile its draws reach: the pass's store rewrites those tiles (`shadow.rs`, "Stored
+  attachments"). Neither value writes the bytes between rows. `CopyBack` is for a caller whose
+  planes no other writer writes while such a command buffer runs; `FORK.md` records why this tree
+  has it. The cost of `Merge` on lavapipe: an iOS display server drawing into three 1179x2556
+  `BGRA8Unorm` framebuffers over host pages ran each write back as a compute dispatch on llvmpipe's
+  compute threads, which took 31 to 77 CPU-seconds in each of the scenes measured, and showed 0.05
+  to 0.17 new frames a second, with 9 to 12 of its command buffers in flight at a commit at the
+  median. A build that copied every shadow back, more than `CopyBack` does, spent at most 0.2
+  CPU-seconds there and showed 1.45 to 1.92 frames a second with one command buffer in flight: a
+  bound on what `CopyBack` alone gains. The runtime's choice: no pipeline differs.
 - `render_lowering = RenderLoweringPolicy::AtCall` (the default) lowers each render encoder call
   inside the call, which returns every refusal. `render_lowering = RenderLoweringPolicy::Worker`
   logs the call once its checks at the call pass, and lowers it later: in batches of 32 calls on

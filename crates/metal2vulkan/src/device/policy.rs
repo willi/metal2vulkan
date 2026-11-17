@@ -8,11 +8,11 @@ use std::time::Duration;
 /// `completion`, `batch_order`, `render_lowering`, `host_page_textures`, `pipeline_waits`,
 /// `pipeline_creation_wait`, `pipeline_commit_wait`, `wide_lines`, `extended_range_blits`,
 /// `queue_sharing`, `unshared_isolation`, `dont_care_colors`, `unstored_dont_care_loads`,
-/// `vertex_reach`, `rate_map_regions`, `managed_copy_in`, `indirect_records` and `watchdog` can
-/// change emitted code, so the profile carries it (containment as the encoding it selects) and its
-/// fingerprint covers it; those twenty are the runtime's alone (a heap's
-/// compressed texture's image, what a heap texture's size query answers, when the host sees a
-/// command buffer complete, how a batch begins after the earlier ones
+/// `vertex_reach`, `rate_map_regions`, `managed_copy_in`, `indirect_records`, `watchdog` and
+/// `surface_write_back` can change emitted code, so the profile carries it (containment as the
+/// encoding it selects) and its fingerprint covers it; those twenty-one are the runtime's alone (a
+/// heap's compressed texture's image, what a heap texture's size query answers, when the host sees
+/// a command buffer complete, how a batch begins after the earlier ones
 /// of its queue, where a render encoder's calls are lowered, what holds a sampled texture over host
 /// pages, whether and how long a pipeline the driver is still making is waited for, which lines
 /// draw a wide line, what a blit through a compressed extended-range texture writes, which
@@ -22,8 +22,9 @@ use std::time::Duration;
 /// layout in the shader where the device's fixed-function input would wrap past 4 GiB, how a
 /// rate-mapped pass's draws reach its regions, when a `Managed` buffer's GPU copy takes the
 /// bytes a `didModifyRange:` names, where an indirect command buffer's records lie on a device
-/// whose held host-pointer imports cost every submission, and how long a queue's front batch may go
-/// without advancing), and no profile carries them.
+/// whose held host-pointer imports cost every submission, how long a queue's front batch may go
+/// without advancing, and how a write through a shadowed texture over an IOSurface plane goes back
+/// into the plane), and no profile carries them.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -119,6 +120,15 @@ pub struct DevicePolicy {
     /// (`FORK.md`).
     #[cfg_attr(feature = "serde", serde(default = "default_watchdog"))]
     pub watchdog: Option<Duration>,
+    /// Whether a write through a shadowed texture over an IOSurface plane the CPU may write goes
+    /// back into the plane by a merge of the words the commands changed (the default), as for every
+    /// other shadow over bytes another writer may write, or, where the texture is tracked, by a
+    /// copy back, as for a plane in a tracked `Private` buffer. A copy back overwrites a write
+    /// another writer made to the texels it moves while the command buffer ran, which Metal keeps
+    /// ([`SurfaceWriteBackPolicy`] says when). A serialized policy without the field reads as the
+    /// default. The runtime's alone: no emitted code changes. This tree's own (`FORK.md`).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub surface_write_back: SurfaceWriteBackPolicy,
     /// Whether a line Apple's `setLineWidth:` widens, at a width the device's own lines draw (which
     /// no device's are taken to draw as Metal's: strict lines, lines that are not parallelograms, a
     /// width off the device's granularity or below 1, a driver's parallelograms, whose ends the
@@ -217,6 +227,7 @@ impl DevicePolicy {
         pipeline_creation_wait: Duration::from_millis(4500),
         pipeline_commit_wait: Duration::from_millis(4500),
         watchdog: Some(Duration::from_millis(20_200)),
+        surface_write_back: SurfaceWriteBackPolicy::Merge,
         wide_lines: WideLinePolicy::Device,
         extended_range_blits: ExtendedRangeBlitPolicy::Kept,
         queue_sharing: QueueSharingPolicy::Adaptive,
@@ -261,6 +272,9 @@ impl DevicePolicy {
     /// which a recovery keeps ([`IndirectRecordsPolicy::Carried`]). Every other field is kept,
     /// `unshared_isolation` among them: its default is the one nearer Metal's, whose queues do
     /// not wait for each other's whole command buffers.
+    ///
+    /// It merges back every write through a shadowed texture over an IOSurface plane the CPU may
+    /// write too ([`SurfaceWriteBackPolicy::Merge`], this tree's own: `FORK.md`).
     pub const fn exact_answers(self) -> DevicePolicy {
         DevicePolicy {
             heap_compression: HeapCompressionPolicy::Uncompressed,
@@ -269,6 +283,7 @@ impl DevicePolicy {
             batch_order: BatchOrderPolicy::Exact,
             render_lowering: RenderLoweringPolicy::AtCall,
             host_page_textures: HostPageTexturePolicy::Shadow,
+            surface_write_back: SurfaceWriteBackPolicy::Merge,
             half_chains: HalfChainPolicy::EachOperation,
             ycbcr_in_place_reads: YCbCrInPlacePolicy::Exact,
             pipeline_waits: PipelineWaitPolicy::Exact,
@@ -485,6 +500,42 @@ pub enum HostPageTexturePolicy {
     /// texels into before each use and merge back after each write, whose copies touch the
     /// texels alone.
     Shadow,
+}
+
+/// How a write through a shadowed, tracked texture over an IOSurface plane the CPU may write goes
+/// back into the plane's bytes: host pages a no-copy buffer imports, the caller's own `VkBuffer`'s
+/// memory, or a `Shared` or `Managed` buffer's (the runtime's `shadow::Backing::Surface`). Under
+/// either value the runtime's own rule holds for an untracked plane's texture (merged back: another
+/// queue's commands may write its bytes in an order the program sets), for a plane in a `Private`
+/// buffer the runtime made (copied back where tracked, as only its commands write it), for a shadow
+/// over bytes that are no plane's, and for a command that writes the plane two ways (merged). The
+/// runtime's choice alone: no emitted code changes. This tree's own (`FORK.md`).
+///
+/// A copy back writes every texel it moves (those inside the rectangle the commands bound their
+/// writes to, else all of them), the ones no command wrote with what the copy in read. So it
+/// departs from Metal only where another writer writes the bytes of texels it moves after the copy
+/// in and before the copy back, both inside the run of a command buffer that writes through the
+/// texture: the copy back overwrites that write, which Metal, storing only the texels its commands
+/// write, keeps. A write before the copy in, or after the command buffer completed, is kept under
+/// either value, and one to a texel the commands write races them under Metal too. Over host pages
+/// whose consumer logs their writes (`HostMemory::with_dirty_pages`), the copy in moves the rows
+/// the log reports changed by the commit, so there the window opens at the commit.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum SurfaceWriteBackPolicy {
+    /// Kept after its copy in and merged back (the default; the runtime's `shadow_merge.rs`): only
+    /// the words the commands changed reach the bytes, so another writer's write beside the
+    /// command buffer to texels the commands leave is kept, as Metal keeps it. Each write back
+    /// costs a keep (a copy of the texels) and a compute dispatch that compares them.
+    #[default]
+    Merge,
+    /// Copied back after each write, with no keep and no merge, as a tracked `Private` buffer's
+    /// plane is; still copied in for each command buffer. For a caller whose planes no other
+    /// writer writes while a command buffer that writes through them runs (a display server's
+    /// framebuffers, which the CPU writes only under the surface's write lock); elsewhere such a
+    /// write may be lost, as the type's doc says.
+    CopyBack,
 }
 
 /// How a chain of `half` additions, subtractions and products rounds on a device without

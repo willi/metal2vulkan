@@ -6,6 +6,7 @@
 //! classed, and so reaches the ledger.
 
 use crate::device::HalfRoundingPolicy;
+use crate::device::SurfaceWriteBackPolicy;
 use crate::device::{
     BatchOrderPolicy, CompletionPolicy, DevicePolicy, DontCareColorPolicy, ExtendedRangeBlitPolicy,
     HalfChainPolicy, HeapAnswerPolicy, HeapCompressionPolicy, HostPageTexturePolicy,
@@ -84,6 +85,9 @@ fn choices() -> Vec<Choice> {
         batch_order: _,
         render_lowering: _,
         host_page_textures: _,
+        // This tree's own (FORK.md): how a write through a shadowed texture over an IOSurface plane
+        // the CPU may write goes back into the plane.
+        surface_write_back: _,
         pipeline_waits: _,
         pipeline_creation_wait: _,
         pipeline_commit_wait: _,
@@ -111,6 +115,7 @@ fn choices() -> Vec<Choice> {
         choice!(p.batch_order: BatchOrderPolicy { Ends, Exact }),
         choice!(p.render_lowering: RenderLoweringPolicy { AtCall, Worker }),
         choice!(p.host_page_textures: HostPageTexturePolicy { InPlace, Shadow }),
+        choice!(p.surface_write_back: SurfaceWriteBackPolicy { Merge, CopyBack }),
         choice!(p.half_chains: HalfChainPolicy { AtExits, EachOperation }),
         choice!(p.half_rounding: HalfRoundingPolicy { Native, Exact }),
         choice!(p.ycbcr_in_place_reads: YCbCrInPlacePolicy { Model, Exact }),
@@ -943,4 +948,52 @@ fn a_policy_serialized_without_the_watchdog_keeps_the_default_bound() {
     written["watchdog"] = serde_json::Value::Null;
     let read: DevicePolicy = serde_json::from_value(written).unwrap();
     assert_eq!(read.watchdog, None);
+}
+
+/// The runtime's choice of how a write through a shadowed IOSurface plane goes back
+/// (`surface_write_back`, this tree's own: FORK.md) moves no committed profile's fingerprint.
+#[test]
+fn the_runtime_s_surface_write_back_choice_keys_no_profile() {
+    use crate::spirv::testing::committed_profiles_with;
+    let merged = committed_profiles_with(DevicePolicy::UNTRUSTED).expect("profiles");
+    let copied = committed_profiles_with(DevicePolicy {
+        surface_write_back: SurfaceWriteBackPolicy::CopyBack,
+        ..DevicePolicy::UNTRUSTED
+    })
+    .expect("profiles");
+    assert_eq!(merged.len(), copied.len());
+    for ((stem, m), (other, c)) in merged.iter().zip(&copied) {
+        assert_eq!(stem, other);
+        assert_eq!(m.fingerprint(), c.fingerprint(), "{stem}");
+    }
+}
+
+/// `DevicePolicy::exact_answers()` merges every shadowed plane back, Metal's answer, from a
+/// policy that copies them back too.
+#[test]
+fn exact_answers_merge_every_surface_back() {
+    let copied = DevicePolicy {
+        surface_write_back: SurfaceWriteBackPolicy::CopyBack,
+        ..DevicePolicy::UNTRUSTED
+    };
+    assert_eq!(
+        copied.exact_answers().surface_write_back,
+        SurfaceWriteBackPolicy::Merge
+    );
+}
+
+/// A serialized policy written before `surface_write_back` existed reads as merging, the
+/// default's value.
+#[cfg(feature = "serde")]
+#[test]
+fn a_policy_serialized_without_the_surface_write_back_merges() {
+    let copied = DevicePolicy {
+        surface_write_back: SurfaceWriteBackPolicy::CopyBack,
+        ..DevicePolicy::UNTRUSTED
+    };
+    let mut written = serde_json::to_value(copied).unwrap();
+    let fields = written.as_object_mut().unwrap();
+    assert!(fields.remove("surface_write_back").is_some());
+    let read: DevicePolicy = serde_json::from_value(written).unwrap();
+    assert_eq!(read.surface_write_back, SurfaceWriteBackPolicy::Merge);
 }

@@ -5306,7 +5306,7 @@ impl Counters {
             (true, Backing::AliasedHostPages) => {
                 &self.shadow_texels_first_copied_in_aliased_host_pages
             }
-            (true, Backing::Surface | Backing::PrivateSurface) => {
+            (true, Backing::Surface(_) | Backing::PrivateSurface) => {
                 &self.shadow_texels_first_copied_in_surfaces
             }
             (false, Backing::Image | Backing::PrivateImage) => {
@@ -5318,7 +5318,7 @@ impl Counters {
             (false, Backing::AliasedHostPages) => {
                 &self.shadow_texels_recopied_in_aliased_host_pages
             }
-            (false, Backing::Surface | Backing::PrivateSurface) => {
+            (false, Backing::Surface(_) | Backing::PrivateSurface) => {
                 &self.shadow_texels_recopied_in_surfaces
             }
         });

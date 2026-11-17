@@ -455,7 +455,9 @@ impl ShadowMerge {
         // slices past its first over an IOSurface plane lie in its tail even where the buffer's
         // bytes run on past them: those bytes are the plane's own, which the array never writes.
         let rounded = span.next_multiple_of(4);
-        let in_place = copies.merges_back()
+        // A plane the device's policy copies back merges a two-ways write as the source's merge of
+        // it would (this tree's own: `FORK.md`).
+        let in_place = (copies.merges_back() || copies.copied_back())
             && merged.tail.is_none()
             && first.is_multiple_of(4)
             && first + rounded <= buffer.end()

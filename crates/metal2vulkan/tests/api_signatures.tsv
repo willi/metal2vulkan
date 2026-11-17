@@ -1532,6 +1532,7 @@ enum	metal2vulkan::device::SimdClass	#[derive(Clone, Copy, Debug, PartialEq, Eq,
 enum	metal2vulkan::device::SpirvExtension	#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)] #[non_exhaustive] pub enum SpirvExtension
 enum	metal2vulkan::device::StageCreateFlag	#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)] #[non_exhaustive] pub enum StageCreateFlag
 enum	metal2vulkan::device::SubgroupOp	#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)] #[non_exhaustive] pub enum SubgroupOp
+enum	metal2vulkan::device::SurfaceWriteBackPolicy	#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))] #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)] #[non_exhaustive] pub enum SurfaceWriteBackPolicy
 enum	metal2vulkan::device::Tier	#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)] #[non_exhaustive] pub enum Tier
 enum	metal2vulkan::device::UnsharedIsolationPolicy	#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))] #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)] #[non_exhaustive] pub enum UnsharedIsolationPolicy
 enum	metal2vulkan::device::UnstoredDontCarePolicy	#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))] #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)] #[non_exhaustive] pub enum UnstoredDontCarePolicy
@@ -4555,6 +4556,7 @@ field	metal2vulkan::device::DevicePolicy.pointer_domain	pub pointer_domain: Poin
 field	metal2vulkan::device::DevicePolicy.queue_sharing	pub queue_sharing: QueueSharingPolicy
 field	metal2vulkan::device::DevicePolicy.rate_map_regions	pub rate_map_regions: RateMapRegionPolicy
 field	metal2vulkan::device::DevicePolicy.render_lowering	pub render_lowering: RenderLoweringPolicy
+field	metal2vulkan::device::DevicePolicy.surface_write_back	pub surface_write_back: SurfaceWriteBackPolicy
 field	metal2vulkan::device::DevicePolicy.unshared_isolation	pub unshared_isolation: UnsharedIsolationPolicy
 field	metal2vulkan::device::DevicePolicy.unstored_dont_care_loads	pub unstored_dont_care_loads: UnstoredDontCarePolicy
 field	metal2vulkan::device::DevicePolicy.vertex_reach	pub vertex_reach: VertexReachPolicy
@@ -13904,6 +13906,8 @@ variant	metal2vulkan::device::SubgroupOp::Quad	Quad
 variant	metal2vulkan::device::SubgroupOp::Shuffle	Shuffle
 variant	metal2vulkan::device::SubgroupOp::ShuffleRelative	ShuffleRelative
 variant	metal2vulkan::device::SubgroupOp::Vote	Vote
+variant	metal2vulkan::device::SurfaceWriteBackPolicy::CopyBack	CopyBack
+variant	metal2vulkan::device::SurfaceWriteBackPolicy::Merge	Merge
 variant	metal2vulkan::device::Tier::Cluster32	Cluster32
 variant	metal2vulkan::device::Tier::Direct	Direct
 variant	metal2vulkan::device::Tier::Emulated	Emulated
