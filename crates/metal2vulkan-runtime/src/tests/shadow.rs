@@ -2557,9 +2557,9 @@ fn a_recording_in_place_of_another_keeps_its_takes() {
 
 /// Under `SurfaceWriteBackPolicy::CopyBack` (this tree's own: `FORK.md`) a tracked texture over an
 /// IOSurface plane the CPU may write is copied in and back, nothing kept, as a tracked `Private`
-/// buffer's is; but its image never stands across command buffers, whose gaps are the CPU's, and
-/// a command that writes it two ways keeps and merges it, as under `Merge`. An untracked plane's,
-/// which another queue may write while the pass runs, merges back.
+/// buffer's is; but a command that writes it two ways keeps and merges it, as under `Merge`. An
+/// untracked plane's, which another queue may write while the pass runs, merges back. That it is
+/// still copied in for each command buffer is the device test's (`tests/surface_write_back.rs`).
 #[test]
 fn a_tracked_plane_is_copied_back_under_copy_back() {
     let buffer = ResourceKey::new();
@@ -2571,7 +2571,6 @@ fn a_tracked_plane_is_copied_back_under_copy_back() {
     };
     let copied = plane(true);
     assert!(!copied.merges_back());
-    assert!(!copied.stands_across());
     assert!(plane(false).merges_back());
     let kc = copied.shadow_key;
     let mut made = 0;

@@ -135,7 +135,7 @@ else, and these keep the source's rule under either value:
 - an untracked plane's texture, whose bytes another queue's commands may write while a pass runs,
   in an order the program sets;
 - a command that writes the plane two ways (through the texture and its bytes, or through two
-  textures over them), which merges in place, as under `Merge`;
+  textures over them), which merges in place wherever `Merge`'s merge would;
 - a plane in a `Private` buffer, a texture that is no plane's (over host pages, a mapped buffer or
   a caller's `VkBuffer`), and a pass over a linear attachment's kept image, which merges into the
   surface's bytes (`linear_merge.rs`).
@@ -179,12 +179,12 @@ command buffer that writes through it runs.
 ### Why the caller it is for meets that
 
 This tree is pinned for a host that runs an iOS display server's compositor on lavapipe. It makes
-one device in each process it runs and sets `CopyBack` on each. The planes the cost comes from are
-the display server's framebuffers; a process's commands may write others (an app's layer surfaces,
-say), whose writers fall in the same four kinds, but the traces below checked the framebuffers
-alone. The writers are:
+one device in each process it runs and sets `CopyBack` on the display server's alone; every other
+process keeps `Merge`. The display server's framebuffers are the planes the cost comes from, and
+the ones the traces below checked; other processes' planes (an app's layer surfaces, say) were not
+checked, so they keep the source's rule. The framebuffers' writers are:
 
-1. The process's own commands: the device's, on tracked textures (the host makes a plane's
+1. The display server's own commands: the device's, on tracked textures (the host makes a plane's
    texture with the descriptor's hazard tracking mode, whose default Metal resolves as tracked),
    which the tracker orders, so not another writer. An untracked plane merges back.
 2. The host's frame reader, in the display server's process: it copies the newest frame out under
@@ -196,9 +196,11 @@ alone. The writers are:
 
 In traced boots of that host, every lock that had to wait for the framebuffers' command buffers was
 a read lock (271 of them, all the frame reader's), no write lock waited in any process, and only
-the display server's command buffers wrote the three framebuffers. Whether the framebuffers'
-textures are tracked shows in `WorkCounts::shadow_merge_dispatches_planned`: under `CopyBack` the
-display server plans none for them.
+the display server's command buffers wrote the three framebuffers. `WorkCounts` counts merges for
+the whole device, not by texture: a run of the display server in which
+`shadow_merge_dispatches_planned` and `shadow_texels_kept` stay 0 shows that no shadow of it
+merged, the framebuffers' among them, so their textures are tracked; a nonzero count needs the
+shadow trace to say which texture merged.
 
 That leaves three ways a write could still be lost: a CPU write without the lock, which IOSurface's
 contract forbids and which is unordered against the GPU on a Mac too; a write lock that gives up
@@ -226,11 +228,14 @@ copy in read, not garbage, until the next write covers them.
   end of the module's "Merged back" rule. `work_counts.rs` and `large_surface` match
   `Backing::Surface(_)`.
 - `crates/metal2vulkan-runtime/src/shadow_merge.rs`: `in_place` takes `copied_back()` beside
-  `merges_back()`, so a two-ways merge of a `CopyBack` plane stays in place.
+  `merges_back()`, so a two-ways merge of a `CopyBack` plane goes in place wherever `Merge`'s
+  would (an unaligned first byte, a tail or a staging buffer still merges through a copy, under
+  either value).
 - Tests: `crates/metal2vulkan-runtime/src/tests/shadow.rs`
   (`a_tracked_plane_is_copied_back_under_copy_back` at the file's end, and three
   `Backing::Surface(SurfaceWriteBackPolicy::Merge)` in the source's tests), and the device test
-  `tests/surface_write_back.rs`, behind one `mod` line in `tests/mod.rs`.
+  `tests/surface_write_back.rs` (each value's write back, and a plane copied in again for each
+  command buffer), behind one `mod` line in `tests/mod.rs`.
 - `docs/FAST-PATHS.md`: its row, first under "Accuracy switches whose default is Metal's".
 - `crates/metal2vulkan/tests/api_surface.rs`: the enum's line, after `HostPageTexturePolicy`; four
   rows of `crates/metal2vulkan/tests/api_signatures.tsv` (the enum, its two variants and the
@@ -294,7 +299,7 @@ the pages, no shadow at all), drop this field for the source's.
    kept and merged, and is still copied in for each command buffer, never standing across them,
    and a two-ways command still merges it. Do not carry it into `only_commands_write` or
    `stands_across`. Then
-   `rg -n 'merges_back\(\)|copied_back\(\)|only_commands_write\(\)|Backing::Surface' crates/metal2vulkan-runtime/src -g '!tests/**'`
+   `rg -n 'merges_back\(\)|copied_back\(\)|only_commands_write\(\)|Backing::Surface' crates/metal2vulkan-runtime/src -g '!**/tests/**'`
    should name only `shadow.rs` (`Backing::of`, `large_surface`, `stands_across`, `merges_back`,
    `copied_back` and `merged_back`), `in_place` in `shadow_merge.rs`, the pass runs' check in
    `render.rs` and two arms in `work_counts.rs`. A new caller, or a new `Backing` that holds an
