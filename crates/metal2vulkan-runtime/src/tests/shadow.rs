@@ -12,7 +12,7 @@ use super::super::shadow::{
 use super::super::shadow_merge::ScratchSpares;
 use super::super::tracker::{Access, ImagePlace, Use, UseRange};
 use ash::vk;
-use metal2vulkan::device::{DevicePolicy, SurfaceWriteBackPolicy};
+use metal2vulkan::device::SurfaceWriteBackPolicy;
 use metal2vulkan::error::Feature;
 use std::ops::Range;
 use std::sync::atomic::AtomicU64;
@@ -1321,8 +1321,7 @@ fn one_command_writing_a_texture_and_its_bytes_another_way_keeps_and_merges_it()
 /// tracked `Private` buffer's bytes, which no other writer writes while a command buffer runs,
 /// merge nothing back: the last is copied in and back; an untracked `Private` buffer's merges.
 /// So does an IOSurface plane's in a tracked `Private` buffer (a consumer's device copy of the
-/// surface), where a plane the CPU may write merges; but under `SurfaceWriteBackPolicy::CopyBack`
-/// (this tree's own: FORK.md) that plane is copied in and back too.
+/// surface), where a plane the CPU may write merges.
 #[test]
 fn a_texture_over_a_buffer_s_bytes_is_merged_where_it_would_be_copied_back() {
     let buffer = ResourceKey::new();
@@ -1340,12 +1339,7 @@ fn a_texture_over_a_buffer_s_bytes_is_merged_where_it_would_be_copied_back() {
     };
     assert!(!with(Backing::PrivateSurface, true).merges_back());
     assert!(with(Backing::PrivateSurface, false).merges_back());
-    let surface = |policy| with(Backing::Surface(policy), true);
-    let untrusted = DevicePolicy::UNTRUSTED.surface_write_back;
-    let exact = DevicePolicy::UNTRUSTED.exact_answers().surface_write_back;
-    assert!(surface(untrusted).merges_back() && surface(exact).merges_back());
-    let copied = Arc::new(surface(SurfaceWriteBackPolicy::CopyBack));
-    assert!(!copied.merges_back());
+    assert!(with(Backing::Surface(SurfaceWriteBackPolicy::Merge), true).merges_back());
     let mut dropped = Arc::into_inner(shadow(buffer, 0..1024)).expect("one holder");
     dropped.drops_writes = true;
     assert!(!dropped.merges_back());
@@ -1385,12 +1379,6 @@ fn a_texture_over_a_buffer_s_bytes_is_merged_where_it_would_be_copied_back() {
     assert_eq!(run(&mut sync, &[(&private, true)], &[]), [Moved::Into(kp)]);
     assert_eq!(run(&mut sync, &[(&private, true)], &[]), []);
     assert_eq!(moved(&sync.finish()), [Moved::Back(kp)]);
-    // A plane the CPU may write, under `CopyBack`: so too.
-    let kc = copied.shadow_key;
-    let mut sync = ShadowSync::default();
-    assert_eq!(run(&mut sync, &[(&copied, true)], &[]), [Moved::Into(kc)]);
-    assert_eq!(run(&mut sync, &[(&copied, true)], &[]), []);
-    assert_eq!(moved(&sync.finish()), [Moved::Back(kc)]);
     // Every texel replaced: no copy in, no keep, a copy back.
     let mut sync = ShadowSync::<u32>::default();
     let replacing = ShadowUse {
@@ -2565,4 +2553,41 @@ fn a_recording_in_place_of_another_keeps_its_takes() {
     levels.mark_stale();
     assert_eq!(first_use(&mut ShadowSync::over(took_none), &t), []);
     assert_eq!(first_use(&mut ShadowSync::default(), &t), [Moved::Into(kt)]);
+}
+
+/// Under `SurfaceWriteBackPolicy::CopyBack` (this tree's own: `FORK.md`) a tracked texture over an
+/// IOSurface plane the CPU may write is copied in and back, nothing kept, as a tracked `Private`
+/// buffer's is; but its image never stands across command buffers, whose gaps are the CPU's, and
+/// a command that writes it two ways keeps and merges it, as under `Merge`. An untracked plane's,
+/// which another queue may write while the pass runs, merges back.
+#[test]
+fn a_tracked_plane_is_copied_back_under_copy_back() {
+    let buffer = ResourceKey::new();
+    let plane = |tracked| {
+        let mut copies = Arc::into_inner(shadow(buffer, 0..1024)).expect("one holder");
+        copies.backing = Backing::Surface(SurfaceWriteBackPolicy::CopyBack);
+        copies.tracked = tracked;
+        Arc::new(copies)
+    };
+    let copied = plane(true);
+    assert!(!copied.merges_back());
+    assert!(!copied.stands_across());
+    assert!(plane(false).merges_back());
+    let kc = copied.shadow_key;
+    let mut made = 0;
+    let mut run = |sync: &mut ShadowSync<u32>, others: &[Use<ResourceKey>]| {
+        moved(&planned(sync, &mut made, &[(&copied, true)], others))
+    };
+    let mut sync = ShadowSync::default();
+    assert_eq!(run(&mut sync, &[]), [Moved::Into(kc)]);
+    assert_eq!(run(&mut sync, &[]), []);
+    assert_eq!(moved(&sync.finish()), [Moved::Back(kc)]);
+    // Written two ways (its bytes too): kept, and merged.
+    let mut sync = ShadowSync::default();
+    let written = [bytes(buffer, 0..4096, true)];
+    assert_eq!(
+        run(&mut sync, &written),
+        [Moved::Into(kc), Moved::Keep(kc, 1)]
+    );
+    assert_eq!(moved(&sync.finish()), [Moved::Merge(kc, 1)]);
 }

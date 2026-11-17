@@ -1,10 +1,10 @@
-//! A pass's write through a shadowed texture over an IOSurface plane the CPU may write goes back
-//! by the device's `SurfaceWriteBackPolicy` (this tree's own: `FORK.md`): under `Merge`, the
-//! default, it is kept and merged back (`shadow_merge.rs`); under `CopyBack` it is copied back,
-//! with no merge. With no other writer beside the pass, both leave the same bytes: the pass's
-//! texels inside its scissor, and the plane's other texels and the bytes between its rows as the
-//! CPU left them. A texture over the same host pages that is no plane's merges back under
-//! `CopyBack` too: the policy reaches planes alone.
+//! A pass's write through a shadowed texture over an IOSurface plane the CPU may write goes back by
+//! the device's `SurfaceWriteBackPolicy` (this tree's own: `FORK.md`): under `Merge`, the default,
+//! it is kept and merged back (`shadow_merge.rs`); under `CopyBack` a tracked texture's, as this
+//! one is, is copied back, with no merge. With no other writer beside the pass, both leave the same
+//! bytes: the pass's texels inside its scissor, and the plane's other texels and the bytes between
+//! its rows as the CPU left them. A texture over the same host pages that is no plane's merges back
+//! under `CopyBack` too: the policy reaches planes alone.
 //!
 //! The plane lies in a no-copy buffer's host pages, as a host imports a display server's
 //! framebuffer, its rows padded past their texels; the device takes

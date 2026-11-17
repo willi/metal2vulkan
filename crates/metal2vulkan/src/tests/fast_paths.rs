@@ -85,6 +85,9 @@ fn choices() -> Vec<Choice> {
         batch_order: _,
         render_lowering: _,
         host_page_textures: _,
+        // This tree's own (FORK.md): how a write through a shadowed texture over an IOSurface plane
+        // the CPU may write goes back into the plane.
+        surface_write_back: _,
         pipeline_waits: _,
         pipeline_creation_wait: _,
         pipeline_commit_wait: _,
@@ -98,9 +101,6 @@ fn choices() -> Vec<Choice> {
         rate_map_regions: _,
         managed_copy_in: _,
         indirect_records: _,
-        // The runtime's too, and this tree's own (FORK.md): how a write through a shadowed texture
-        // over an IOSurface plane the CPU may write goes back into the plane.
-        surface_write_back: _,
         // The translator's: how a `half` chain rounds without `shaderFloat16`, and how planes of a
         // two-plane YCbCr texture read in place are sampled.
         half_chains: _,
@@ -115,6 +115,7 @@ fn choices() -> Vec<Choice> {
         choice!(p.batch_order: BatchOrderPolicy { Ends, Exact }),
         choice!(p.render_lowering: RenderLoweringPolicy { AtCall, Worker }),
         choice!(p.host_page_textures: HostPageTexturePolicy { InPlace, Shadow }),
+        choice!(p.surface_write_back: SurfaceWriteBackPolicy { Merge, CopyBack }),
         choice!(p.half_chains: HalfChainPolicy { AtExits, EachOperation }),
         choice!(p.half_rounding: HalfRoundingPolicy { Native, Exact }),
         choice!(p.ycbcr_in_place_reads: YCbCrInPlacePolicy { Model, Exact }),
@@ -129,7 +130,6 @@ fn choices() -> Vec<Choice> {
         choice!(p.rate_map_regions: RateMapRegionPolicy { FanOut, Exact }),
         choice!(p.managed_copy_in: ManagedCopyInPolicy { AtSubmission, AtCommit }),
         choice!(p.indirect_records: IndirectRecordsPolicy { Untaxed, Carried }),
-        choice!(p.surface_write_back: SurfaceWriteBackPolicy { Merge, CopyBack }),
     ]
 }
 

@@ -64,11 +64,8 @@
 //!   `Private` buffer's bytes have no such writer: the CPU writes none, and the tracker orders
 //!   another queue's commands that touch them before or after the encoder's command buffer, as
 //!   Metal does (the M3 Max ran another queue's fill of a tracked buffer after the kernel or the
-//!   pass ended, every time), so its texture's shadow is copied back. So is an IOSurface plane's
-//!   that the CPU may write, under `SurfaceWriteBackPolicy::CopyBack` (this tree's own,
-//!   `FORK.md`): there the caller answers that no other writer writes the plane's bytes while a
-//!   command buffer that writes through it runs. A merged-back image is kept, after its copy in,
-//!   before the first command since the last copy back that writes through it,
+//!   pass ended, every time), so its texture's shadow is copied back. A merged-back image is kept,
+//!   after its copy in, before the first command since the last copy back that writes through it,
 //!   and each copy back of it is a merge (`shadow_merge.rs`): only the words the encoder's
 //!   commands changed through the texture since the keep reach the bytes. The keep holds the
 //!   rectangle the commands write in where they bound it ([`ShadowUse::area`]); a command that
@@ -85,6 +82,10 @@
 //!   keeps every texel next, which every later pass of the run writes inside, and one that needs
 //!   texels beyond those the image holds (its copy in moved only a pass's scissors' texels) merges
 //!   what was kept and copies every texel in.
+//!   A tracked IOSurface plane's shadow the CPU may write is copied back instead under the
+//!   device's `SurfaceWriteBackPolicy::CopyBack` (this tree's own, `FORK.md`), whose caller
+//!   answers that nothing but the device's commands writes the plane's bytes while a command
+//!   buffer that writes through it runs ([`ShadowCopies::copied_back`]).
 //! - **Overwrites over logged pages** ([`ShadowCopies::logged`]: host pages whose consumer logs
 //!   every write to them, `dirty_pages.rs`). A command that replaces every texel of such a shadow
 //!   takes the merge instead of the plain copy back: its copy in (which moves only the rows the
@@ -1280,19 +1281,37 @@ impl ShadowCopies {
     /// writes while a command buffer runs, whose writes to texels the commands left Metal keeps;
     /// never copied back over those texels (the module's rules). That is every buffer's bytes but
     /// a tracked `Private` or `Memoryless` buffer's the runtime made, an IOSurface plane's in one
-    /// among them ([`only_commands_write`](Self::only_commands_write)), and an IOSurface plane's
-    /// the device's policy copies back ([`SurfaceWriteBackPolicy::CopyBack`]: its caller answers
-    /// that no other writer writes the plane's bytes while a command buffer runs, `FORK.md`): the
-    /// CPU writes the others (a `Shared` or `Managed` buffer's, host pages, the caller's own
-    /// `VkBuffer`'s memory), and another queue's commands an untracked buffer's, which the tracker
-    /// leaves to the program. An image's shadow, a turned one and two planes take no merge
-    /// ([`unmerged`](Self::unmerged)), and writes Metal drops, and those through a copy taken at
-    /// use, go back no way.
+    /// among them ([`only_commands_write`](Self::only_commands_write)): the CPU writes the others
+    /// (a `Shared` or `Managed` buffer's, host pages, the caller's own `VkBuffer`'s memory), and
+    /// another queue's commands an untracked buffer's, which the tracker leaves to the program. An
+    /// image's shadow, a turned one and two planes take no merge ([`unmerged`](Self::unmerged)),
+    /// and writes Metal drops, and those through a copy taken at use, go back no way.
+    ///
+    /// Nor is a plane's the device's policy copies back ([`copied_back`](Self::copied_back), this
+    /// tree's own: `FORK.md`).
     pub(super) fn merges_back(&self) -> bool {
         let bytes = matches!(&self.source, ShadowSource::Bytes { .. });
-        let copied_back = self.backing == Backing::Surface(SurfaceWriteBackPolicy::CopyBack);
-        let other_writer = !self.only_commands_write() && !copied_back;
-        bytes && other_writer && self.writes_reach_truth() && self.unmerged().is_none()
+        let other_writer = !self.only_commands_write();
+        bytes
+            && other_writer
+            && self.writes_reach_truth()
+            && self.unmerged().is_none()
+            && !self.copied_back()
+    }
+
+    /// Whether a write through the texture goes back by a copy where the source would merge it,
+    /// by the device's [`SurfaceWriteBackPolicy::CopyBack`] (this tree's own: `FORK.md`): a
+    /// tracked texture over an IOSurface plane the CPU may write. Its caller answers that nothing
+    /// but the device's commands writes the plane's bytes while a command buffer that writes
+    /// through it runs; the tracker orders the device's other queues' commands that touch a
+    /// tracked texture, while another queue may write an untracked plane's bytes meanwhile, so
+    /// that one merges back under either value. Only the write back changes: the plane's bytes
+    /// are still the CPU's between command buffers, so its image never stands across them
+    /// ([`stands_across`](Self::stands_across)) and is copied in again for each, and a command
+    /// that writes it two ways still merges, in place where the source's merge is.
+    pub(super) fn copied_back(&self) -> bool {
+        let copy_back = Backing::Surface(SurfaceWriteBackPolicy::CopyBack);
+        self.tracked && self.backing == copy_back
     }
 
     /// Whether what the commands write through the shadow goes back into its truth: not where

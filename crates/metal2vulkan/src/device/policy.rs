@@ -121,12 +121,12 @@ pub struct DevicePolicy {
     #[cfg_attr(feature = "serde", serde(default = "default_watchdog"))]
     pub watchdog: Option<Duration>,
     /// Whether a write through a shadowed texture over an IOSurface plane the CPU may write goes
-    /// back into the plane by a merge of the words the commands changed (the default), as for
-    /// every other shadow over bytes another writer may write, or by a copy back, as for a plane
-    /// in a tracked `Private` buffer. A copy back overwrites a write another writer made to the
-    /// texels it moves while the command buffer ran, which Metal keeps ([`SurfaceWriteBackPolicy`]
-    /// says when). A serialized policy without the field reads as the default. The runtime's
-    /// alone: no emitted code changes. This tree's own (`FORK.md`).
+    /// back into the plane by a merge of the words the commands changed (the default), as for every
+    /// other shadow over bytes another writer may write, or, where the texture is tracked, by a
+    /// copy back, as for a plane in a tracked `Private` buffer. A copy back overwrites a write
+    /// another writer made to the texels it moves while the command buffer ran, which Metal keeps
+    /// ([`SurfaceWriteBackPolicy`] says when). A serialized policy without the field reads as the
+    /// default. The runtime's alone: no emitted code changes. This tree's own (`FORK.md`).
     #[cfg_attr(feature = "serde", serde(default))]
     pub surface_write_back: SurfaceWriteBackPolicy,
     /// Whether a line Apple's `setLineWidth:` widens, at a width the device's own lines draw (which
@@ -269,11 +269,12 @@ impl DevicePolicy {
     /// region ([`RateMapRegionPolicy::Exact`]), every `Managed` buffer's named range taken
     /// on the CPU at the commit ([`ManagedCopyInPolicy::AtCommit`]), and every indirect command
     /// buffer's records in the runtime's own pages wherever the device imports host pointers,
-    /// which a recovery keeps ([`IndirectRecordsPolicy::Carried`]), and every write through a
-    /// shadowed texture over an IOSurface plane the CPU may write merged back
-    /// ([`SurfaceWriteBackPolicy::Merge`]). Every other field is kept,
+    /// which a recovery keeps ([`IndirectRecordsPolicy::Carried`]). Every other field is kept,
     /// `unshared_isolation` among them: its default is the one nearer Metal's, whose queues do
     /// not wait for each other's whole command buffers.
+    ///
+    /// It merges back every write through a shadowed texture over an IOSurface plane the CPU may
+    /// write too ([`SurfaceWriteBackPolicy::Merge`], this tree's own: `FORK.md`).
     pub const fn exact_answers(self) -> DevicePolicy {
         DevicePolicy {
             heap_compression: HeapCompressionPolicy::Uncompressed,
@@ -282,6 +283,7 @@ impl DevicePolicy {
             batch_order: BatchOrderPolicy::Exact,
             render_lowering: RenderLoweringPolicy::AtCall,
             host_page_textures: HostPageTexturePolicy::Shadow,
+            surface_write_back: SurfaceWriteBackPolicy::Merge,
             half_chains: HalfChainPolicy::EachOperation,
             ycbcr_in_place_reads: YCbCrInPlacePolicy::Exact,
             pipeline_waits: PipelineWaitPolicy::Exact,
@@ -294,7 +296,6 @@ impl DevicePolicy {
             rate_map_regions: RateMapRegionPolicy::Exact,
             managed_copy_in: ManagedCopyInPolicy::AtCommit,
             indirect_records: IndirectRecordsPolicy::Carried,
-            surface_write_back: SurfaceWriteBackPolicy::Merge,
             ..self
         }
     }
@@ -501,20 +502,24 @@ pub enum HostPageTexturePolicy {
     Shadow,
 }
 
-/// How a write through a shadowed texture over an IOSurface plane the CPU may write goes back into
-/// the plane's bytes: host pages a no-copy buffer imports, the caller's own `VkBuffer`'s memory, or
-/// a `Shared` or `Managed` buffer's (the runtime's `shadow::Backing::Surface`). A plane in a
-/// `Private` buffer the runtime made goes back by the runtime's own rule under either value (copied
-/// back where tracked, as only its commands write it), and so does a shadow over bytes that are no
-/// plane's. The runtime's choice alone: no emitted code changes. This tree's own (`FORK.md`).
+/// How a write through a shadowed, tracked texture over an IOSurface plane the CPU may write goes
+/// back into the plane's bytes: host pages a no-copy buffer imports, the caller's own `VkBuffer`'s
+/// memory, or a `Shared` or `Managed` buffer's (the runtime's `shadow::Backing::Surface`). Under
+/// either value the runtime's own rule holds for an untracked plane's texture (merged back: another
+/// queue's commands may write its bytes in an order the program sets), for a plane in a `Private`
+/// buffer the runtime made (copied back where tracked, as only its commands write it), for a shadow
+/// over bytes that are no plane's, and for a command that writes the plane two ways (merged). The
+/// runtime's choice alone: no emitted code changes. This tree's own (`FORK.md`).
 ///
 /// A copy back writes every texel it moves (those inside the rectangle the commands bound their
 /// writes to, else all of them), the ones no command wrote with what the copy in read. So it
-/// departs from Metal only where another writer writes the bytes of texels it moves after the
-/// copy in and before the copy back, both inside the run of a command buffer that writes through
-/// the texture: the copy back overwrites that write, which Metal, storing only the texels its
-/// commands write, keeps. A write before the command buffer's copy in, or after it completed, is
-/// kept under either value, and one to a texel the commands write races them under Metal too.
+/// departs from Metal only where another writer writes the bytes of texels it moves after the copy
+/// in and before the copy back, both inside the run of a command buffer that writes through the
+/// texture: the copy back overwrites that write, which Metal, storing only the texels its commands
+/// write, keeps. A write before the copy in, or after the command buffer completed, is kept under
+/// either value, and one to a texel the commands write races them under Metal too. Over host pages
+/// whose consumer logs their writes (`HostMemory::with_dirty_pages`), the copy in moves the rows
+/// the log reports changed by the commit, so there the window opens at the commit.
 #[non_exhaustive]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -526,9 +531,10 @@ pub enum SurfaceWriteBackPolicy {
     #[default]
     Merge,
     /// Copied back after each write, with no keep and no merge, as a tracked `Private` buffer's
-    /// plane is. For a caller whose planes no other writer writes while a command buffer that
-    /// writes through them runs (a display server's framebuffers, which the CPU writes only under
-    /// the surface's write lock); elsewhere such a write may be lost, as the type's doc says.
+    /// plane is; still copied in for each command buffer. For a caller whose planes no other
+    /// writer writes while a command buffer that writes through them runs (a display server's
+    /// framebuffers, which the CPU writes only under the surface's write lock); elsewhere such a
+    /// write may be lost, as the type's doc says.
     CopyBack,
 }
 
